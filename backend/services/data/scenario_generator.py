@@ -21,6 +21,7 @@ from .merchant_database import (
     get_random_merchant, search_merchants_by_features
 )
 from .route_generator import CompleteScenarioGenerator, DetailedRoute
+from .data_anchor_enhancer import DataAnchorEnhancer, AnchorPoint
 
 
 @dataclass
@@ -111,6 +112,9 @@ class EnhancedScenarioGenerator:
         
         # 高德地图执行工具（用于实时数据查询）
         self.amap_tool = None
+        
+        # 数据锚点增强器（解决同名店铺混淆）
+        self.anchor_enhancer = DataAnchorEnhancer()
         
     def _convert_amap_to_merchant(self, amap_poi: AmapPoiResult) -> Merchant:
         """将高德POI数据转换为Merchant对象"""
@@ -799,11 +803,11 @@ class EnhancedScenarioGenerator:
     
     # ==================== 高德地图专用方案生成方法 ==================== #
     
-    def generate_amap_enhanced_scenario(self,
-                                       amap_poi: AmapPoiResult,
-                                       amap_route: AmapRouteResult,
-                                       user_message: str,
-                                       vibe_mode: str = "healing") -> AmapScenario:
+    async def generate_amap_enhanced_scenario(self,
+                                             amap_poi: AmapPoiResult,
+                                             amap_route: AmapRouteResult,
+                                             user_message: str,
+                                             vibe_mode: str = "healing") -> AmapScenario:
         """生成高德地图专用版出游方案
         
         Args:
@@ -828,6 +832,29 @@ class EnhancedScenarioGenerator:
         # 创建Merchant对象用于数据生成
         merchant = self._convert_amap_to_merchant(amap_poi)
         route = self._convert_amap_to_route(amap_route, "当前位置")
+        
+        # 创建数据锚点并进行校验
+        try:
+            anchor_point = await self.anchor_enhancer.create_anchor_from_poi(amap_poi)
+        except Exception as e:
+            logging.warning(f"数据锚点创建失败，使用基础模式: {e}")
+            anchor_point = None
+        if anchor_point:
+            verification_info = {
+                'anchor_id': anchor_point.unique_id,
+                'confidence': anchor_point.confidence,
+                'business_area_verified': anchor_point.business_area,
+                'coordinates_locked': anchor_point.coordinate,
+                'brand_identified': anchor_point.brand_name if anchor_point.brand_name else "N/A"
+            }
+        else:
+            verification_info = {
+                'anchor_id': 'unknown',
+                'confidence': 0.5,
+                'business_area_verified': amap_poi.business_area,
+                'coordinates_locked': amap_poi.location,
+                'brand_identified': 'unknown'
+            }
         
         cost_breakdown = self.generate_cost_breakdown(route, merchant)
         detailed_itinerary = self.generate_detailed_itinerary(merchant, route, weather)

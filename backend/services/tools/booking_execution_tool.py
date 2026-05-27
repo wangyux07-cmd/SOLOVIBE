@@ -388,14 +388,15 @@ class BrowserAutomationTool:
                 
                 log.append(f"检测到机器人阻断: {risk_profile.risk_level.value}")
                 
-                return {
-                    'success': False,
-                    'blocked_by_antibot': True,
-                    'block_info': bot_check,
-                    'user_instruction': user_instruction,
-                    'screenshot': screenshot,
-                    'execution_log': log
-                }
+            return {
+                'success': False,
+                'blocked_by_antibot': True,
+                'risk_profile': risk_profile,
+                'user_instruction': user_instruction,
+                'screenshot': screenshot,
+                'execution_log': log,
+                'strategy_advised': primary_strategy.value if risk_profile.mitigation_strategies else 'manual'
+            }
             
             # 3. 填写表单
             form_data = await self._fill_booking_form(target_poi, user_data, log)
@@ -602,6 +603,7 @@ class PlaywrightBookingExecutionTool:
             ) as browser_tool:
                 
                 # 导航并填写表单
+                browser_tool.antibot_orchestrator = self.antibot_orchestrator
                 form_result = await browser_tool.navigate_with_antisbot_check(
                     target_poi, 
                     validated_request.get('user_data', {})
@@ -615,6 +617,9 @@ class PlaywrightBookingExecutionTool:
                         form_result['screenshot'], 
                         f"{booking_id}_antibot.png"
                     )
+                    
+                    # 获取风险等级
+                    risk_level = form_result['risk_profile'].risk_level.value if form_result.get('risk_profile') else 'unknown'
                     
                     await self._send_feedback(
                         feedback_callback, ExecutionStage.FINALIZING, BookingStatus.FAILED,
