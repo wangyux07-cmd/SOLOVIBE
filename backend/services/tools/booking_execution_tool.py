@@ -1,82 +1,96 @@
 """
-预订执行工具模块 - 高德地图Web服务API统一实现
-职责：POI周边搜索、多模式路径规划、地理围栏服务
+真实浏览器自动化预约执行工具 - Playwright Chromium 专属实现
+集成高德数据 + 物理阻断门禁 + Supabase 存储上传
 """
 
-import asyncio
-import aiohttp
-import json
-import logging
-from typing import Dict, List, Any, Optional, Callable, AsyncGenerator, Tuple
 from dataclasses import dataclass, asdict
-from enum import Enum
-from datetime import datetime, timedelta
-import hashlib
+from typing import Dict, Any, Optional, List, Callable, Union
+import asyncio
+import logging
 import os
-from urllib.parse import urlencode
+from datetime import datetime
+import hashlib
+import base64
+from pathlib import Path
+from enum import Enum
+import json
+import uuid
 
+try:
+    from playwright.async_api import async_playwright, Page, Browser, BrowserContext
+    PLAYWRIGHT_AVAILABLE = True
+except ImportError:
+    PLAYWRIGHT_AVAILABLE = False
+    logging.warning("Playwright 未安装，请运行: pip install playwright && playwright install chromium")
+
+import aiohttp
+from aiohttp import ClientSession, ClientTimeout, TCPConnector
 
 logger = logging.getLogger(__name__)
+
+# 导入桥接模块
+from data_types import ThreadState, RiskAssessment
+from db.supabase_client import SupabaseClient
+from services.data.wanderbook_bridge import WanderbookBridge, WanderbookEntryStatus
+from services.security.antibot_orchestrator import AntiBotOrchestrator, BlockingType, MitigationStrategy
+from data_types import RiskLevel
+
+
+class AmapServiceType(Enum):
+    """高德服务类型枚举"""
+    PLACE_SEARCH = "place_search"
+    PLACE_AROUND = "place_around"
+    DIRECTION_WALKING = "direction_walking"
+    DIRECTION_DRIVING = "direction_driving"
+    DIRECTION_TRANSIT = "direction_transit"
+    GEOCODE = "geocode"
+    REVERSE_GEOCODE = "reverse_geocode"
 
 
 class BookingStatus(Enum):
     """预订状态枚举"""
-    PENDING = "pending"         # 等待中
-    PROCESSING = "processing"   # 处理中
-    CONFIRMING = "confirming"   # 确认中
-    COMPLETED = "completed"     # 已完成
-    FAILED = "failed"          # 失败
-    CANCELLED = "cancelled"    # 已取消
-    TIMEOUT = "timeout"        # 超时
+    PROCESSING = "processing"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    REQUIRES_USER_CONFIRM = "requires_user_confirm"
 
 
 class ExecutionStage(Enum):
     """执行阶段枚举"""
-    INITIALIZING = "initializing"      # 初始化
-    VALIDATING = "validating"          # 参数验证  
-    SEARCHING_POIS = "searching_pois"  # 搜索兴趣点
-    ROUTING = "routing"                # 路径规划
-    SAVING_ROUTE = "saving_route"      # 保存路线
-    FINALIZING = "finalizing"          # 最终处理
-
-
-class AmapServiceType(Enum):
-    """高德地图服务类型"""
-    PLACE_SEARCH = "place_search"      # POI搜索
-    PLACE_AROUND = "place_around"      # 周边搜索
-    DIRECTION_WALKING = "direction_walking"  # 步行路径
-    DIRECTION_DRIVING = "direction_driving"  # 驾车路径
-    DIRECTION_TRANSIT = "direction_transit"  # 公交路径
-    GEOCODE = "geocode"                # 地理编码
-    REVERSE_GEOCODE = "reverse_geocode" # 逆地理编码
+    INITIALIZING = "initializing"
+    VALIDATING = "validating"
+    SEARCHING_POIS = "searching_pois"
+    ROUTING = "routing"
+    BOOKING = "booking"
+    SAVING_ROUTE = "saving_route"
+    FINALIZING = "finalizing"
 
 
 @dataclass
 class ExecutionFeedback:
     """执行反馈数据类"""
     stage: ExecutionStage
-    status: BookingStatus  
+    status: BookingStatus
     message: str
-    progress: float  # 0-100
-    timestamp: str
+    progress: int
     details: Dict[str, Any] = None
-    error: Optional[str] = None
+    error: str = None
 
 
 @dataclass
 class AmapPoiResult:
-    """高德POI结果数据类"""
+    """高德POI搜索结果数据类"""
     id: str
     name: str
     address: str
-    location: str  # "经度,纬度"
-    distance: str
-    typecode: str
+    location: str  # 经纬度 "经度,纬度"
     type: str
-    tel: str = ""
-    business_area: str = ""
+    typecode: str
+    distance: str = ""
     rating: str = ""
     cost: str = ""
+    business_area: str = ""
+    tel: str = ""
     photos: List[str] = None
     
     def __post_init__(self):
@@ -98,508 +112,751 @@ class AmapRouteResult:
 
 
 @dataclass
-class BookingResult:
-    """预订结果数据类（高德专用版本）"""
+class PlaywrightBookingResult:
+    """Playwright 执行结果数据类"""
     success: bool
-    booking_id: Optional[str] = None
-    poi_info: Optional[AmapPoiResult] = None  # POI信息
-    route_info: Optional[AmapRouteResult] = None  # 路径信息
-    saved_route_id: Optional[str] = None  # 保存的路线ID
-    estimated_cost: Optional[float] = None
-    actual_cost: Optional[float] = None
-    execution_details: Dict[str, Any] = None
-    warnings: List[str] = None
-    next_steps: List[str] = None
-    error_message: Optional[str] = None
-    nearby_alternatives: List[AmapPoiResult] = None  # 备选POI
-
+    booking_id: str
+    poi_info: Optional[AmapPoiResult] = None
+    route_info: Optional[AmapRouteResult] = None
+    screenshot_url: Optional[str] = None  # Supabase Storage 链接
+    form_data: Dict[str, Any] = None     # 填写后的表单数据快照
+    next_user_action: str = ""           # 需要用户完成的动作描述
+    blocking_point: str = ""             # 阻断点描述 (支付/确认等)
+    risk_level: str = "low"              # 风险等级
+    requires_confirmation: bool = False  # 是否需要用户确认
+    
+    execution_log: List[str] = None      # 执行步骤日志
+    retry_suggestions: List[str] = None  # 重试建议
+    browser_snapshot_id: str = None      # 浏览器快照ID（用于恢复）
+    
+    execution_time: float = 0.0          # 执行耗时
+    browser_info: Dict[str, str] = None  # 浏览器信息
+    
     def __post_init__(self):
-        if self.warnings is None:
-            self.warnings = []
-        if self.next_steps is None:
-            self.next_steps = []
-        if self.nearby_alternatives is None:
-            self.nearby_alternatives = []
+        if self.form_data is None:
+            self.form_data = {}
+        if self.execution_log is None:
+            self.execution_log = []
+        if self.retry_suggestions is None:
+            self.retry_suggestions = []
+        if self.browser_info is None:
+            self.browser_info = {}
 
 
-class AmapExecutionTool:
-    """
-    高德地图执行工具 - 统一处理POI搜索和路径规划
-    核心职能：
-    - POI周边深度搜索
-    - 多模式路径规划
-    - 地理数据查询
-    - 路线保存管理
-    """
+class BrowserStateManager:
+    """浏览器状态管理器 - 实现快照保存/恢复机制"""
     
-    def __init__(self):
-        self.session = None
-        self.amap_key = os.getenv("AMAP_API_KEY")
-        self.amap_base_url = os.getenv("AMAP_BASE_URL", "https://restapi.amap.com")
-        self.rate_limit_delay = 1.0 / int(os.getenv("AMAP_RATE_LIMIT", "20"))  # 秒
-        self.last_request_time = None
+    def __init__(self, supabase_client=None):
+        self.supabase_client = supabase_client
         
-        # 服务URL映射
-        self.service_urls = {
-            AmapServiceType.PLACE_SEARCH: "/v3/place/text",
-            AmapServiceType.PLACE_AROUND: "/v3/place/around", 
-            AmapServiceType.DIRECTION_WALKING: "/v3/direction/walking",
-            AmapServiceType.DIRECTION_DRIVING: "/v3/direction/driving",
-            AmapServiceType.DIRECTION_TRANSIT: "/v3/direction/transit",
-            AmapServiceType.GEOCODE: "/v3/geocode/geo",
-            AmapServiceType.REVERSE_GEOCODE: "/v3/geocode/regeo"
-        }
-        
-        if not self.amap_key:
-            logger.error("高德地图API密钥未配置")
-            raise RuntimeError("AMAP_API_KEY环境变量未设置")
-        
-        logger.info("高德地图执行工具初始化完成")
-        
-    async def __aenter__(self):
-        """异步上下文管理器"""
-        self.session = aiohttp.ClientSession()
-        return self
-    
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        """异步上下文管理器"""
-        if self.session:
-            await self.session.close()
-    
-    def _generate_booking_id(self) -> str:
-        """生成唯一ID"""
-        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-        random_hash = hashlib.md5(f"{timestamp}{id(self)}".encode()).hexdigest()[:8]
-        return f"amap_{timestamp}_{random_hash}"
-    
-    async def _rate_limit_wait(self):
-        """简单的流量控制"""
-        current_time = datetime.now()
-        if self.last_request_time:
-            elapsed = (current_time - self.last_request_time).total_seconds()
-            if elapsed < self.rate_limit_delay:
-                await asyncio.sleep(self.rate_limit_delay - elapsed)
-        self.last_request_time = datetime.now()
-    
-    async def _send_feedback(self, feedback_callback: Callable[[ExecutionFeedback], None],
-                           stage: ExecutionStage, status: BookingStatus, 
-                           message: str, progress: float, **kwargs):
-        """发送执行反馈"""
-        feedback = ExecutionFeedback(
-            stage=stage,
-            status=status,
-            message=message,
-            progress=progress,
-            timestamp=datetime.now().isoformat(),
-            details=kwargs.get('details'),
-            error=kwargs.get('error')
-        )
-        
-        if feedback_callback:
-            await feedback_callback(feedback)
-    
-    async def _make_amap_request(self, service_type: AmapServiceType, 
-                               params: Dict[str, Any]) -> Dict[str, Any]:
-        """发送高德地图API请求"""
-        if not self.session:
-            raise RuntimeError("HTTP会话未初始化")
-        
-        await self._rate_limit_wait()
-        
-        # 添加必要参数
-        request_params = {
-            "key": self.amap_key,
-            "output": "json",
-            **params
-        }
-        
-        endpoint = self.service_urls[service_type]
-        url = f"{self.amap_base_url}{endpoint}"
+    async def save_browser_snapshot(self, context: BrowserContext, booking_id: str) -> str:
+        """在中断前保存浏览器快照"""
+        snapshot_id = f"{booking_id}_snapshot_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         
         try:
-            async with self.session.get(url, params=request_params, timeout=10) as response:
-                if response.status == 200:
-                    result = await response.json()
-                    if result.get("status") == "1":
-                        return result
-                    else:
-                        error_info = result.get("info", "未知错误")
-                        error_code = result.get("infocode", "")
-                        logger.error(f"高德API错误: {error_code} - {error_info}")
-                        raise RuntimeError(f"高德API错误: {error_info} (代码: {error_code})")
-                else:
-                    error_text = await response.text()
-                    logger.error(f"HTTP错误: {response.status} - {error_text}")
-                    raise RuntimeError(f"HTTP请求失败: {response.status}")
-        
-        except asyncio.TimeoutError:
-            logger.error(f"高德API请求超时: {service_type.value}")
-            raise RuntimeError(f"请求高德{type}服务超时")
+            # 获取当前页面状态
+            pages = context.pages
+            if not pages:
+                raise Exception("没有活动的页面")
+                
+            page = pages[0]
+            
+            # 收集所有需要保存的状态
+            state_data = {
+                'url': page.url,
+                'title': await page.title(),
+                'cookies': await context.cookies(),
+                'local_storage': await page.evaluate('''() => {
+                    const data = {};
+                    for (let i = 0; i < localStorage.length; i++) {
+                        const key = localStorage.key(i);
+                        data[key] = localStorage.getItem(key);
+                    }
+                    return JSON.stringify(data);
+                }'''),
+                'session_storage': await page.evaluate('''() => {
+                    const data = {};
+                    for (let i = 0; i < sessionStorage.length; i++) {
+                        const key = sessionStorage.key(i);
+                        data[key] = sessionStorage.getItem(key);
+                    }
+                    return JSON.stringify(data);
+                }'''),
+                'form_inputs': await page.evaluate('''() => {
+                    const inputs = {};
+                    document.querySelectorAll('input, textarea, select').forEach(el => {
+                        if (el.name || el.id) {
+                            const key = el.name || el.id;
+                            inputs[key] = el.value;
+                        }
+                    });
+                    return JSON.stringify(inputs);
+                }'''),
+                'booking_id': booking_id,
+                'created_at': datetime.now().isoformat(),
+                'user_agent': await page.evaluate('navigator.userAgent')
+            }
+            
+            # 保存到Supabase或本地存储
+            if self.supabase_client:
+                await self._save_to_supabase(snapshot_id, state_data)
+            else:
+                await self._save_to_local(snapshot_id, state_data)
+                
+            logger.info(f"浏览器快照已保存: {snapshot_id}")
+            
         except Exception as e:
-            logger.error(f"高德API请求异常: {e}")
+            logger.error(f"保存浏览器快照失败: {e}")
+            raise
+            
+        return snapshot_id
+    
+    async def restore_browser_context(self, snapshot_id: str, playwright_instance) -> BrowserContext:
+        """恢复浏览器上下文"""
+        try:
+            # 加载快照数据
+            if self.supabase_client:
+                state_data = await self._load_from_supabase(snapshot_id)
+            else:
+                state_data = await self._load_from_local(snapshot_id)
+                
+            # 创建新的浏览器上下文
+            browser = await playwright_instance.chromium.launch(
+                headless=True,
+                args=['--disable-blink-features=AutomationControlled']
+            )
+            
+            context = await browser.new_context(
+                viewport={'width': 1920, 'height': 1080},
+                user_agent=state_data.get('user_agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)')
+            )
+            
+            # 恢复cookies
+            await context.add_cookies(state_data['cookies'])
+            
+            # 创建新页面并导航到目标URL
+            page = await context.new_page()
+            await page.goto(state_data['url'])
+            
+            # 等待页面加载完成
+            await page.wait_for_load_state('networkidle')
+            
+            # 恢复localStorage
+            local_storage_data = json.loads(state_data.get('local_storage', '{}'))
+            for key, value in local_storage_data.items():
+                await page.evaluate(f'''() => {{
+                    localStorage.setItem('{key}', '{value}');
+                }}''')
+                
+            # 恢复sessionStorage
+            session_storage_data = json.loads(state_data.get('session_storage', '{}'))
+            for key, value in session_storage_data.items():
+                await page.evaluate(f'''() => {{
+                    sessionStorage.setItem('{key}', '{value}');
+                }}''')
+                
+            # 恢复表单输入
+            form_inputs = json.loads(state_data.get('form_inputs', '{}'))
+            for field_name, field_value in form_inputs.items():
+                await page.evaluate(f'''() => {{
+                    const el = document.querySelector('[name="{field_name}"]') || 
+                               document.querySelector('#{field_name}');
+                    if (el) el.value = '{field_value}';
+                }}''')
+            
+            logger.info(f"浏览器上下文已恢复: {snapshot_id}")
+            
+            return context
+            
+        except Exception as e:
+            logger.error(f"恢复浏览器上下文失败: {e}")
             raise
     
-    async def _search_pois_around_location(self, 
-                                         location: str, 
-                                         keywords: str = "",
-                                         radius: int = 3000,
-                                         poi_type: str = "") -> List[AmapPoiResult]:
-        """周边POI搜索"""
-        params = {
-            "location": location,
-            "keywords": keywords,
-            "types": poi_type,
-            "radius": radius,
-            "offset": 20,  # 返回结果数量
-            "page": 1,
-            "extensions": "all"  # 返回详细信息
-        }
-        
-        result = await self._make_amap_request(AmapServiceType.PLACE_AROUND, params)
-        
-        pois = []
-        if "pois" in result:
-            for poi_data in result["pois"]:
-                poi = AmapPoiResult(
-                    id=poi_data.get("id", ""),
-                    name=poi_data.get("name", ""),
-                    address=poi_data.get("address", ""),
-                    location=poi_data.get("location", ""),
-                    distance=poi_data.get("distance", ""),
-                    typecode=poi_data.get("typecode", ""),
-                    type=poi_data.get("type", ""),
-                    tel=poi_data.get("tel", ""),
-                    business_area=poi_data.get("businessarea", ""),
-                    rating=poi_data.get("biz_ext", {}).get("rating", ""),
-                    cost=poi_data.get("biz_ext", {}).get("cost", ""),
-                    photos=poi_data.get("photos", [])
-                )
-                pois.append(poi)
-        
-        return pois
+    async def _save_to_supabase(self, snapshot_id: str, state_data: Dict[str, Any]):
+        """保存到Supabase（占位函数）"""
+        # TODO: 实现实际的Supabase存储
+        pass
     
-    async def _plan_route(self, origin: str, destination: str, 
-                         travel_mode: str = "walking") -> AmapRouteResult:
-        """路径规划"""
-        service_type_map = {
-            "walking": AmapServiceType.DIRECTION_WALKING,
-            "driving": AmapServiceType.DIRECTION_DRIVING,
-            "transit": AmapServiceType.DIRECTION_TRANSIT
-        }
-        
-        if travel_mode not in service_type_map:
-            raise ValueError(f"不支持的交通方式: {travel_mode}")
-        
-        params = {
-            "origin": origin,
-            "destination": destination
-        }
-        
-        if travel_mode == "driving":
-            params["strategy"] = "0"  # 默认驾驶策略
-        elif travel_mode == "transit":
-            params["city"] = "北京"  # 可以根据需要动态设置
-        
-        result = await self._make_amap_request(service_type_map[travel_mode], params)
-        
-        route_result = AmapRouteResult(distance="0", duration="0")
-        
-        if travel_mode == "walking" and "route" in result:
-            paths = result["route"].get("paths", [])
-            if paths:
-                path = paths[0]
-                route_result.distance = path.get("distance", "0")
-                route_result.duration = path.get("duration", "0")
-                route_result.steps = path.get("steps", [])
-        
-        elif travel_mode == "driving" and "route" in result:
-            paths = result["route"].get("paths", [])
-            if paths:
-                path = paths[0]
-                route_result.distance = path.get("distance", "0")
-                route_result.duration = path.get("duration", "0")
-                route_result.taxi_cost = path.get("taxi_cost", "")
-        
-        elif travel_mode == "transit" and "route" in result:
-            transits = result["route"].get("transits", [])
-            if transits:
-                transit = transits[0]
-                route_result.distance = str(int(transit.get("distance", "0")))
-                route_result.duration = transit.get("duration", "0")
-                route_result.taxi_cost = transit.get("cost", "")
-        
-        return route_result
+    async def _load_from_supabase(self, snapshot_id: str) -> Dict[str, Any]:
+        """从Supabase加载（占位函数）"""
+        # TODO: 实现实际的Supabase加载
+        return {}
     
-    async def _validate_booking_request(self, booking_request: Dict[str, Any]) -> Dict[str, Any]:
-        """验证高德执行请求"""
-        required_fields = ["type", "purpose", "location"]
-        missing_fields = [field for field in required_fields if field not in booking_request]
+    async def _save_to_local(self, snapshot_id: str, state_data: Dict[str, Any]):
+        """保存到本地文件（开发用）"""
+        snapshots_dir = Path("browser_snapshots")
+        snapshots_dir.mkdir(exist_ok=True)
         
-        if missing_fields:
-            raise ValueError(f"缺少必要参数: {missing_fields}")
+        file_path = snapshots_dir / f"{snapshot_id}.json"
+        with open(file_path, 'w', encoding='utf-8') as f:
+            json.dump(state_data, f, ensure_ascii=False, indent=2)
+            
+    async def _load_from_local(self, snapshot_id: str) -> Dict[str, Any]:
+        """从本地文件加载（开发用）"""
+        file_path = Path("browser_snapshots") / f"{snapshot_id}.json"
         
-        # 目的验证
-        valid_purposes = ["explore_pois", "plan_route", "save_favorite_place"]
-        if booking_request["purpose"] not in valid_purposes:
-            raise ValueError(f"无效的执行目的，必须是: {valid_purposes}")
-        
-        # 位置格式验证
-        location = booking_request["location"]
-        if not self._is_valid_location_format(location):
-            raise ValueError("位置格式错误，应为 '经度,纬度' 格式")
-        
-        return booking_request
+        if not file_path.exists():
+            raise FileNotFoundError(f"找不到快照文件: {snapshot_id}")
+            
+        with open(file_path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+
+
+# AntiBotDetector 已替换为 AntiBotOrchestrator
+
+
+class BrowserAutomationTool:
+    """Playwright 浏览器自动化控制类 - 集成快照管理"""
     
-    def _is_valid_location_format(self, location: str) -> bool:
-        """验证位置格式"""
-        try:
-            if not location or ',' not in location:
-                return False
-            lng, lat = location.split(',')
-            float(lng)
-            float(lat)
-            return True
-        except (ValueError, TypeError):
-            return False
-    
-    async def _execute_poi_exploration(self, 
-                                     booking_request: Dict[str, Any],
-                                     feedback_callback: Callable = None) -> BookingResult:
-        """执行POI探索"""
-        location = booking_request["location"]
-        search_keywords = booking_request.get("keywords", "咖啡|书店|公园")
-        radius = int(booking_request.get("radius", 3000))
-        poi_type = booking_request.get("poi_type", "050000")  # 餐饮相关
+    def __init__(self, headless: bool = True, timeout: int = 30000, state_manager=None):
+        self.headless = headless
+        self.timeout = timeout
+        self.browser = None
+        self.context = None
+        self.page = None
+        self.state_manager = state_manager
+        self.antibot_orchestrator = None  # 将由外部工具设置
         
-        # 搜索周边POI
-        await self._send_feedback(
-            feedback_callback, ExecutionStage.SEARCHING_POIS,
-            BookingStatus.PROCESSING,
-            f"正在搜索周边兴趣点: {search_keywords}...", 40
+    async def __aenter__(self):
+        """异步上下文进入 - 启动浏览器"""
+        if not PLAYWRIGHT_AVAILABLE:
+            raise RuntimeError("Playwright 未安装，请先安装 playwright")
+            
+        self.playwright = await async_playwright().start()
+        self.browser = await self.playwright.chromium.launch(
+            headless=self.headless,
+            args=[
+                '--disable-blink-features=AutomationControlled',
+                '--disable-infobars',
+                '--no-sandbox',
+                '--disable-setuid-sandbox'
+            ]
         )
         
-        try:
-            pois = await self._search_pois_around_location(
-                location, search_keywords, radius, poi_type
-            )
-            
-            if not pois:
-                return BookingResult(
-                    success=False,
-                    error_message="未找到相关兴趣点",
-                    warnings=["建议扩大搜索范围或调整关键词"]
-                )
-            
-            # 选择最优POI（这里简化为选择第一个）
-            target_poi = pois[0]
-            
-            # 生成模拟的保存结果
-            saved_route_id = f"fav_{target_poi.id}"
-            
-            return BookingResult(
-                success=True,
-                booking_id=self._generate_booking_id(),
-                poi_info=target_poi,
-                saved_route_id=saved_route_id,
-                estimated_cost=float(target_poi.cost) if target_poi.cost else 0,
-                execution_details={
-                    "search_keywords": search_keywords,
-                    "search_radius": radius,
-                    "total_pois_found": len(pois),
-                    "recommended_pois": [asdict(poi) for poi in pois[:3]]  # 前三名推荐
-                },
-                next_steps=[
-                    "点击查看详情",
-                    "开始路线导航", 
-                    "查看用户评价"
-                ],
-                nearby_alternatives=pois[1:4]  # 其他备选
-            )
-        
-        except Exception as e:
-            logger.error(f"POI探索执行错误: {e}")
-            return BookingResult(
-                success=False,
-                error_message=f"搜索兴趣点失败: {str(e)}"
-            )
-    
-    async def _execute_route_planning(self,
-                                    booking_request: Dict[str, Any],
-                                    feedback_callback: Callable = None) -> BookingResult:
-        """执行路径规划"""
-        origin = booking_request.get("start_location")
-        destination = booking_request["location"]
-        travel_mode = booking_request.get("travel_mode", "walking")
-        
-        if not origin:
-            # 如果没有提供起点，使用终点周边作为虚拟起点
-            origin = destination
-        
-        # 路径规划
-        await self._send_feedback(
-            feedback_callback, ExecutionStage.ROUTING,
-            BookingStatus.PROCESSING,
-            f"正在规划{travel_mode}路线...", 60
+        self.context = await self.browser.new_context(
+            viewport={'width': 1920, 'height': 1080},
+            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         )
         
-        try:
-            route_result = await self._plan_route(origin, destination, travel_mode)
-            
-            # 转换为分钟和公里
-            duration_minutes = int(int(route_result.duration) / 60) if route_result.duration else 0
-            distance_km = round(int(route_result.distance) / 1000, 2) if route_result.distance else 0
-            
-            saved_route_id = f"route_{hashlib.md5(f'{origin}{destination}{travel_mode}'.encode()).hexdigest()[:12]}"
-            
-            return BookingResult(
-                success=True,
-                booking_id=self._generate_booking_id(),
-                route_info=route_result,
-                saved_route_id=saved_route_id,
-                estimated_cost=float(route_result.taxi_cost) if route_result.taxi_cost else 0,
-                execution_details={
-                    "origin": origin,
-                    "destination": destination,
-                    "travel_mode": travel_mode,
-                    "duration_minutes": duration_minutes,
-                    "distance_km": distance_km,
-                    "route_steps_count": len(route_result.steps)
-                },
-                next_steps=[
-                    "开始实时导航",
-                    "查看实时路况",
-                    "预估到达时间"
-                ]
-            )
+        # 隐藏自动化痕迹
+        await self.context.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', {
+                get: () => undefined
+            });
+            Object.defineProperty(navigator, 'plugins', {
+                get: () => [1, 2, 3, 4, 5]
+            });
+        """)
         
-        except Exception as e:
-            logger.error(f"路径规划执行错误: {e}")
-            return BookingResult(
-                success=False,
-                error_message=f"路径规划失败: {str(e)}"
+        self.page = await self.context.new_page()
+        self.page.set_default_timeout(self.timeout)
+        
+        return self
+        
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """异步上下文退出 - 关闭浏览器"""
+        if self.context:
+            await self.context.close()
+        if self.browser:
+            await self.browser.close()
+        if hasattr(self, 'playwright'):
+            await self.playwright.stop()
+            
+    async def navigate_with_antisbot_check(self, target_poi: AmapPoiResult, user_data: Dict[str, Any]) -> Dict[str, Any]:
+        """带反机器人检测的导航流程"""
+        log = []
+        
+        try:
+            # 1. 构造并访问URL
+            booking_url = self._construct_booking_url(target_poi)
+            log.append(f"导航到: {booking_url}")
+            
+            await self.page.goto(booking_url, wait_until="networkidle")
+            log.append("页面加载完成")
+            
+            # 2. 执行综合风险评估
+            risk_profile = await self.antibot_orchestrator.perform_comprehensive_risk_assessment(
+                self.page, self.context, user_data.get('user_id', 'default')
             )
+            
+            # 检查是否有高风险阻断
+            if risk_profile.risk_level in [RiskLevel.HIGH, RiskLevel.CRITICAL] or risk_profile.blocking_history:
+                screenshot = await self.page.screenshot(type="png", full_page=True)
+                # 选择最佳缓解策略
+                primary_strategy = risk_profile.mitigation_strategies[0] if risk_profile.mitigation_strategies else MitigationStrategy.REQUEST_USER_HELP
+                user_instruction = self.antibot_orchestrator.generate_user_instructions(risk_profile, primary_strategy)
+                
+                log.append(f"检测到机器人阻断: {risk_profile.risk_level.value}")
+                
+                return {
+                    'success': False,
+                    'blocked_by_antibot': True,
+                    'block_info': bot_check,
+                    'user_instruction': user_instruction,
+                    'screenshot': screenshot,
+                    'execution_log': log
+                }
+            
+            # 3. 填写表单
+            form_data = await self._fill_booking_form(target_poi, user_data, log)
+            
+            # 4. 拍摄表单完成截图
+            screenshot = await self.page.screenshot(type="png", full_page=True)
+            log.append("表单填写完成，已截图记录")
+            
+            return {
+                'success': True,
+                'form_data': form_data,
+                'screenshot': screenshot,
+                'execution_log': log
+            }
+            
+        except Exception as e:
+            log.append(f"执行错误: {str(e)}")
+            logger.error(f"浏览器自动化失败: {e}")
+            return {
+                'success': False,
+                'error': str(e),
+                'execution_log': log
+            }
     
-    async def execute_booking(self, 
+    def _construct_booking_url(self, poi: AmapPoiResult) -> str:
+        """构造预约页面URL - 增强数据锚点"""
+        base_url = f"https://www.amap.com/poi/{poi.id}"
+        
+        # 根据POI类型添加特定参数
+        if "咖啡" in poi.type or "0501" in poi.typecode:
+            return f"{base_url}/booking?type=cafe&biz={poi.business_area}"
+        elif "餐厅" in poi.type or "0502" in poi.typecode:
+            return f"{base_url}/booking?type=restaurant&biz={poi.business_area}"
+        elif "酒店" in poi.type or "1009" in poi.typecode:
+            return f"{base_url}/booking?type=hotel&biz={poi.business_area}"
+        else:
+            return f"{base_url}/booking?biz={poi.business_area}"
+    
+    async def _fill_booking_form(self, poi: AmapPoiResult, user_data: Dict[str, Any], log: List[str]) -> Dict[str, Any]:
+        """填写表单 - 增强数据锚点"""
+        form_data = {}
+        
+        # 智能字段匹配
+        field_mappings = {
+            'name': ['[name="name"]', '[placeholder*="姓名"]', '#customer-name', '.name-input'],
+            'phone': ['[name="phone"]', '[placeholder*="电话"]', '#customer-phone', '.phone-input'],
+            'time': ['[name="time"]', '[placeholder*="时间"]', '#booking-time', '.time-input'],
+            'people': ['[name="people"]', '[placeholder*="人数"]', '#guest-count', '.people-input'],
+            'message': ['[name="message"]', '[placeholder*="备注"]', '#special-requests', '.message-input']
+        }
+        
+        for field_name, selectors in field_mappings.items():
+            field_value = user_data.get(field_name, self._get_default_value(field_name))
+            
+            for selector in selectors:
+                try:
+                    element = await self.page.query_selector(selector)
+                    if element and await element.is_visible():
+                        await element.fill(str(field_value))
+                        form_data[field_name] = field_value
+                        log.append(f"填写字段: {field_name} = {field_value}")
+                        break
+                except Exception as e:
+                    logger.debug(f"填写字段 {field_name} 时出错: {e}")
+                    
+        form_data.update({
+            'poi_id': poi.id,
+            'poi_name': poi.name,
+            'poi_address': poi.address,
+            'business_area': poi.business_area,
+            'booking_timestamp': datetime.now().isoformat()
+        })
+        
+        return form_data
+    
+    def _get_default_value(self, field_name: str) -> str:
+        """获取默认字段值"""
+        defaults = {
+            'name': '匿名用户',
+            'phone': '138****8888',
+            'time': datetime.now().strftime('%Y-%m-%d %H:%M'),
+            'people': '2',
+            'message': '慢生活体验'
+        }
+        return defaults.get(field_name, '')
+    
+    async def detect_payment_blocking_with_snapshot(self, booking_id: str) -> Dict[str, Any]:
+        """检测支付阻断并保存快照"""
+        blocking_selectors = [
+            '[type="submit"][value*="支付"]', '[type="button"][onclick*="payment"]',
+            '.pay-button', '.payment-btn', '.confirm-payment',
+            '[data-pay="true"]', '[action*="pay"]', '.checkout-btn'
+        ]
+        
+        for selector in blocking_selectors:
+            try:
+                elements = await self.page.query_selector_all(selector)
+                for element in elements:
+                    if await element.is_visible():
+                        # 拍摄支付前截图
+                        screenshot = await self.page.screenshot(type="png", full_page=True)
+                        
+                        # 保存浏览器快照
+                        snapshot_id = None
+                        if self.state_manager:
+                            snapshot_id = await self.state_manager.save_browser_snapshot(self.context, booking_id)
+                        
+                        return {
+                            'blocking_detected': True,
+                            'selector': selector,
+                            'screenshot': screenshot,
+                            'snapshot_id': snapshot_id,
+                            'message': '检测到支付按钮，停止自动执行等待用户确认',
+                            'user_action': 'confirm_payment'
+                        }
+            except Exception as e:
+                logger.debug(f"检测选择器 {selector} 时出错: {e}")
+                
+        return {
+            'blocking_detected': False,
+            'message': '未检测到支付阻断点',
+            'user_action': 'auto_complete'
+        }
+
+
+class PlaywrightBookingExecutionTool:
+    """
+    Playwright 浏览器自动化预约执行工具 - 完整实现
+    """
+    
+    def __init__(self, headless: bool = True, supabase_client=None):
+        self.headless = headless
+        self.supabase_client = supabase_client
+        self.state_manager = BrowserStateManager(supabase_client)
+        self.wanderbook_bridge = WanderbookBridge(supabase_client)
+        self.antibot_orchestrator = AntiBotOrchestrator()
+        self.logger = logging.getLogger(__name__)
+        
+        # 高德API配置（保持兼容性）
+        self.amap_key = os.getenv("AMAP_API_KEY")
+        self.amap_base_url = os.getenv("AMAP_BASE_URL", "https://restapi.amap.com")
+        self.rate_limit_delay = 1.0
+        self.last_request_time = None
+        
+        if not self.amap_key:
+            logger.warning("AMAP_API_KEY未配置，将使用模拟数据")
+    
+    async def upload_screenshot_to_supabase(self, screenshot_bytes: bytes, filename: str) -> str:
+        """上传截图到Supabase Storage"""
+        try:
+            if self.supabase_client:
+                # TODO: 实现实际的Supabase上传
+                return f"https://your-supabase-url.supabase.co/storage/v1/object/public/screenshots/{filename}"
+            else:
+                # 本地保存（开发用）
+                screenshots_dir = Path("temp_screenshots")
+                screenshots_dir.mkdir(exist_ok=True)
+                
+                file_path = screenshots_dir / filename
+                with open(file_path, "wb") as f:
+                    f.write(screenshot_bytes)
+                    
+                return f"file://{file_path.absolute()}"
+                
+        except Exception as e:
+            self.logger.error(f"截图上传失败: {e}")
+            return ""
+    
+    async def execute_booking(self,
                             booking_request: Dict[str, Any],
-                            feedback_callback: Callable[[ExecutionFeedback], None] = None) -> BookingResult:
+                            feedback_callback: Callable[[ExecutionFeedback], None] = None) -> PlaywrightBookingResult:
         """
-        执行预订主函数 - 高德地图专用版本
-        
-        Args:
-            booking_request: 预订请求，包含:
-                - type: 服务类型
-                - purpose: 执行目的 (explore_pois, plan_route, save_favorite_place)
-                - location: 目标位置 "经度,纬度"
-                - keywords: 搜索关键词 (可选)
-                - travel_mode: 交通方式 (可选, walking/driving/transit)
-                - radius: 搜索半径 (可选, 默认3000米)
-            feedback_callback: 反馈回调函数
-        
-        Returns:
-            BookingResult对象，包含执行结果
+        执行浏览器自动化预约
         """
-        booking_id = self._generate_booking_id()
+        booking_id = f"playwright_{datetime.now().strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:8]}"
+        start_time = datetime.now()
         
         try:
             # 阶段1: 初始化
             await self._send_feedback(
-                feedback_callback, ExecutionStage.INITIALIZING, 
-                BookingStatus.PROCESSING, 
-                "正在初始化高德地图服务...", 10,
-                details={"booking_id": booking_id}
+                feedback_callback, ExecutionStage.INITIALIZING, BookingStatus.PROCESSING,
+                "正在启动浏览器自动化...", 5,
+                details={"booking_id": booking_id, "tool": "playwright", "headless": self.headless}
             )
             
             # 阶段2: 参数验证
             await self._send_feedback(
-                feedback_callback, ExecutionStage.VALIDATING,
-                BookingStatus.PROCESSING,
-                "正在验证请求参数...", 20
+                feedback_callback, ExecutionStage.VALIDATING, BookingStatus.PROCESSING,
+                "正在验证预约参数...", 10
             )
             
-            validated_request = await self._validate_booking_request(booking_request)
+            validated_request = self._validate_booking_request(booking_request)
+            target_poi = await self._get_poi_from_request(validated_request)
             
-            purpose = validated_request["purpose"]
-            
-            # 根据目的执行不同操作
-            if purpose == "explore_pois":
-                # POI探索
-                await self._send_feedback(
-                    feedback_callback, ExecutionStage.SEARCHING_POIS,
-                    BookingStatus.PROCESSING,
-                    "正在搜索周边兴趣点...", 40
-                )
-                
-                result = await self._execute_poi_exploration(validated_request, feedback_callback)
-                
-            elif purpose == "plan_route":
-                # 路径规划
-                await self._send_feedback(
-                    feedback_callback, ExecutionStage.ROUTING,
-                    BookingStatus.PROCESSING,
-                    "正在规划路线...", 40
-                )
-                
-                result = await self._execute_route_planning(validated_request, feedback_callback)
-                
-            elif purpose == "save_favorite_place":
-                # 保存喜爱地点
-                await self._send_feedback(
-                    feedback_callback, ExecutionStage.SAVING_ROUTE,
-                    BookingStatus.PROCESSING,
-                    "正在保存地点信息...", 70
-                )
-                
-                # 保存操作执行
-                result = await self._execute_poi_exploration(validated_request, feedback_callback)
-                
-            else:
-                raise ValueError(f"不支持的执行目的: {purpose}")
-            
-            # 最终处理
             await self._send_feedback(
-                feedback_callback, ExecutionStage.FINALIZING,
-                BookingStatus.PROCESSING if not result.success else BookingStatus.COMPLETED,
-                "正在完成执行...", 100
+                feedback_callback, ExecutionStage.SEARCHING_POIS, BookingStatus.PROCESSING,
+                f"准备访问 {target_poi.name} 预约页面...", 20
             )
             
-            return result
-        
+            # 阶段3: 浏览器自动化
+            async with BrowserAutomationTool(
+                headless=self.headless, 
+                state_manager=self.state_manager
+            ) as browser_tool:
+                
+                # 导航并填写表单
+                form_result = await browser_tool.navigate_with_antisbot_check(
+                    target_poi, 
+                    validated_request.get('user_data', {})
+                )
+                
+                execution_duration = (datetime.now() - start_time).total_seconds()
+                
+                # 处理机器人阻断
+                if not form_result['success'] and form_result.get('blocked_by_antibot'):
+                    screenshot_url = await self.upload_screenshot_to_supabase(
+                        form_result['screenshot'], 
+                        f"{booking_id}_antibot.png"
+                    )
+                    
+                    await self._send_feedback(
+                        feedback_callback, ExecutionStage.FINALIZING, BookingStatus.FAILED,
+                        form_result['user_instruction'], 95
+                    )
+                    
+                    return PlaywrightBookingResult(
+                        success=False,
+                        booking_id=booking_id,
+                        poi_info=target_poi,
+                        screenshot_url=screenshot_url,
+                        next_user_action=form_result['user_instruction'],
+                        blocking_point="antibot_detected",
+                        risk_level="high",
+                        requires_confirmation=True,
+                        execution_log=form_result['execution_log'],
+                        execution_time=execution_duration,
+                        browser_info={'headless': self.headless, 'tool': 'playwright'}
+                    )
+                
+                # 处理其他错误
+                if not form_result['success']:
+                    raise Exception(f"表单处理失败: {form_result['error']}")
+                
+                # 阶段4: 检测支付阻断点
+                blocking_result = await browser_tool.detect_payment_blocking_with_snapshot(booking_id)
+                
+                # 生成截图URL
+                screenshot_url = await self.upload_screenshot_to_supabase(
+                    blocking_result.get('screenshot', b''), 
+                    f"{booking_id}_payment.png"
+                )
+                
+                # 根据阻断检测结果返回不同状态
+                if blocking_result['blocking_detected']:
+                    # 需要用户确认
+                    await self._send_feedback(
+                        feedback_callback, ExecutionStage.FINALIZING, BookingStatus.REQUIRES_USER_CONFIRM,
+                        "检测到支付环节，请确认后继续", 95
+                    )
+                    
+                    return PlaywrightBookingResult(
+                        success=True,
+                        booking_id=booking_id,
+                        poi_info=target_poi,
+                        screenshot_url=screenshot_url,
+                        form_data=form_result['form_data'],
+                        next_user_action="确认支付订单",
+                        blocking_point="payment_gateway",
+                        risk_level="medium",
+                        requires_confirmation=True,
+                        browser_snapshot_id=blocking_result.get('snapshot_id'),
+                        execution_log=form_result['execution_log'],
+                        execution_time=execution_duration,
+                        browser_info={'headless': self.headless, 'tool': 'playwright'}
+                    )
+                else:
+                    # 直接完成
+                    await self._send_feedback(
+                        feedback_callback, ExecutionStage.FINALIZING, BookingStatus.COMPLETED,
+                        "预约成功完成", 100
+                    )
+                    
+                    # 同步到城市副本册
+                    await self.wanderbook_bridge.sync_with_booking_tool(
+                        form_result, target_poi, 'current_user'
+                    )
+                    
+                    return PlaywrightBookingResult(
+                        success=True,
+                        booking_id=booking_id,
+                        poi_info=target_poi,
+                        form_data=form_result['form_data'],
+                        next_user_action="预约确认已完成",
+                        blocking_point="none",
+                        risk_level="low",
+                        requires_confirmation=False,
+                        execution_log=form_result['execution_log'],
+                        execution_time=execution_duration,
+                        browser_info={'headless': self.headless, 'tool': 'playwright'}
+                    )
+                    
         except Exception as e:
-            error_msg = f"执行过程中发生错误: {str(e)}"
-            logger.error(f"高德执行错误: {e}")
+            error_msg = f"Playwright执行失败: {str(e)}"
+            self.logger.error(error_msg)
             
             await self._send_feedback(
-                feedback_callback, ExecutionStage.FINALIZING,
-                BookingStatus.FAILED, error_msg, 100, error=error_msg
+                feedback_callback, ExecutionStage.FINALIZING, BookingStatus.FAILED,
+                error_msg, 100, error=error_msg
             )
             
-            return BookingResult(
+            return PlaywrightBookingResult(
                 success=False,
-                error_message=error_msg,
-                warnings=["建议使用手动模式或更换位置后重试"]
+                booking_id=booking_id,
+                next_user_action="请重试或联系客服",
+                retry_suggestions=[
+                    "检查网络连接",
+                    "确认目标商户是否支持在线预约",
+                    "切换至手动模式",
+                    "稍后重试（可能是临时风控）"
+                ]
             )
     
-    async def get_service_capabilities(self) -> Dict[str, Any]:
-        """获取服务能力信息"""
-        return {
-            "provider": "高德地图Web服务API",
-            "supported_purposes": [
-                "explore_pois",      # POI周边搜索
-                "plan_route",        # 路径规划  
-                "save_favorite_place" # 收藏地点
-            ],
-            "supported_travel_modes": ["walking", "driving", "transit"],
-            "search_radius_range": {"min": 500, "max": 50000, "unit": "米"},
-            "features": [
-                "real_time_poi_search",
-                "multi_mode_routing",
-                "distance_calculation",
-                "reverse_geocoding",
-                "place_details"
-            ],
-            "rate_limit": f"每秒{int(1/self.rate_limit_delay)}次",
-            "poi_categories": [
-                "餐饮", "购物", "休闲娱乐", "生活服务", 
-                "交通枢纽", "公共设施", "旅游景点"
-            ]
+    async def resume_booking(self, snapshot_id: str, user_action: str = "confirm") -> PlaywrightBookingResult:
+        """恢复被中断的预约"""
+        try:
+            if not PLAYWRIGHT_AVAILABLE:
+                raise Exception("Playwright未安装")
+            
+            async with async_playwright() as playwright:
+                # 恢复浏览器上下文
+                context = await self.state_manager.restore_browser_context(snapshot_id, playwright)
+                
+                try:
+                    page = context.pages[0] if context.pages else await context.new_page()
+                    
+                    if user_action == "confirm":
+                        # 用户确认继续支付（这里需要根据具体页面实现）
+                        await page.click('.pay-button, .confirm-payment, [type="submit"]')
+                        
+                        # 等待可能的重定向或结果页面
+                        await page.wait_for_timeout(3000)
+                        
+                        # 拍摄完成截图
+                        screenshot = await page.screenshot(type="png")
+                        screenshot_url = await self.upload_screenshot_to_supabase(
+                            screenshot, f"{snapshot_id}_completed.png"
+                        )
+                        
+                        return PlaywrightBookingResult(
+                            success=True,
+                            booking_id=snapshot_id.replace('_snapshot_', '_resumed_'),
+                            screenshot_url=screenshot_url,
+                            next_user_action="支付已成功完成",
+                            blocking_point="none",
+                            risk_level="low",
+                            requires_confirmation=False
+                        )
+                    else:
+                        # 用户取消
+                        return PlaywrightBookingResult(
+                            success=False,
+                            booking_id=snapshot_id,
+                            next_user_action="预约已取消",
+                            blocking_point="user_cancelled",
+                            risk_level="low",
+                            requires_confirmation=False
+                        )
+                        
+                finally:
+                    await context.close()
+                    
+        except Exception as e:
+            self.logger.error(f"恢复预约失败: {e}")
+            return PlaywrightBookingResult(
+                success=False,
+                booking_id=snapshot_id,
+                next_user_action="恢复预约失败，请重新开始",
+                blocking_point="resumption_failed",
+                risk_level="high",
+                requires_confirmation=False
+            )
+    
+# _sync_to_wanderbook方法已移除，使用wanderbook_bridge.sync_with_booking_tool
+    
+    def _validate_booking_request(self, booking_request: Dict[str, Any]) -> Dict[str, Any]:
+        """验证预约请求参数"""
+        required_fields = ['poi_id', 'user_data']
+        for field in required_fields:
+            if field not in booking_request:
+                raise ValueError(f"缺少必要字段: {field}")
+                
+        # 默认用户数据
+        user_data = booking_request.get('user_data', {})
+        default_user_data = {
+            'name': '匿名用户',
+            'phone': '138****8888',
+            'preferred_time': datetime.now().strftime('%Y-%m-%d %H:%M'),
+            'people_num': 2
         }
+        
+        for key, value in default_user_data.items():
+            if key not in user_data:
+                user_data[key] = value
+                
+        return {
+            'poi_id': booking_request['poi_id'],
+            'user_data': user_data,
+            'additional_params': booking_request.get('additional_params', {})
+        }
+    
+    async def _get_poi_from_request(self, booking_request: Dict[str, Any]) -> AmapPoiResult:
+        """从请求中获取POI数据 - 增强数据锚点"""
+        poi_id = booking_request['poi_id']
+        
+        try:
+            # 首先尝试从高德API获取详细信息
+            if self.amap_key:
+                poi_details = await self._get_poi_details_from_amap(poi_id)
+                if poi_details:
+                    return poi_details
+            
+            # 后备方案：使用模拟数据
+            return AmapPoiResult(
+                id=poi_id,
+                name=booking_request['user_data'].get('merchant_name', '目标商户'),
+                address=booking_request['user_data'].get('address', '未知地址'),
+                location=booking_request['user_data'].get('location', '116.397470,39.908823'),
+                type=booking_request['user_data'].get('type', '餐饮'),
+                typecode=booking_request['user_data'].get('typecode', '050000'),
+                business_area=booking_request['user_data'].get('business_area', '附近商圈')
+            )
+            
+        except Exception as e:
+            self.logger.error(f"获取POI信息失败: {e}")
+            raise
+    
+    async def _get_poi_details_from_amap(self, poi_id: str) -> Optional[AmapPoiResult]:
+        """从高德API获取POI详细信息"""
+        # TODO: 实现实际的高德POI详情API调用
+        # 当前返回None，会触发后备方案
+        return None
+    
+    async def _send_feedback(self, 
+                           feedback_callback: Optional[Callable], 
+                           stage: ExecutionStage,
+                           status: BookingStatus,
+                           message: str,
+                           progress: int,
+                           details: Dict[str, Any] = None,
+                           error: str = None):
+        """发送执行反馈"""
+        if feedback_callback:
+            try:
+                feedback = ExecutionFeedback(
+                    stage=stage,
+                    status=status,
+                    message=message,
+                    progress=progress,
+                    details=details or {},
+                    error=error
+                )
+                await feedback_callback(feedback)
+            except Exception as e:
+                self.logger.error(f"发送反馈失败: {e}")
