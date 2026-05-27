@@ -10,7 +10,21 @@ from datetime import datetime
 import re
 from difflib import SequenceMatcher
 
-from ...data_types import AmapPoiResult
+# AmapPoiResult 定义在booking_execution_tool.py中，避免循环导入
+from dataclasses import dataclass
+
+@dataclass
+class SimpleAmapPoiResult:
+    """简化的AmapPoiResult，用于避免循环导入"""
+    id: str
+    name: str
+    address: str
+    location: str
+    type: str
+    typecode: str
+    business_area: str = ""
+    rating: str = ""
+    tel: str = ""
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +101,7 @@ class DataAnchorEnhancer:
             'comprehensive_score': 0.70
         }
     
-    async def create_anchor_from_poi(self, poi: AmapPoiResult) -> AnchorPoint:
+    async def create_anchor_from_poi(self, poi: SimpleAmapPoiResult) -> AnchorPoint:
         """从POI创建数据锚点"""
         try:
             # 提取坐标
@@ -153,8 +167,8 @@ class DataAnchorEnhancer:
             raise
     
     async def match_poi_with_anchors(self, 
-                                   target_poi: AmapPoiResult,
-                                   candidate_pois: List[AmapPoiResult]) -> MatchResult:
+                                   target_poi: SimpleAmapPoiResult,
+                                   candidate_pois: List[SimpleAmapPoiResult]) -> MatchResult:
         """
         匹配合适的POI，基于多重锚点校验
         """
@@ -230,8 +244,8 @@ class DataAnchorEnhancer:
         )
     
     async def validate_and_correct_match(self,
-                                      target_poi: AmapPoiResult,
-                                      selected_poi: AmapPoiResult) -> Tuple[bool, float, List[str]]:
+                                      target_poi: SimpleAmapPoiResult,
+                                      selected_poi: SimpleAmapPoiResult) -> Tuple[bool, float, List[str]]:
         """
         验证并纠正匹配结果
         """
