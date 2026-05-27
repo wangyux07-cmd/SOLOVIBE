@@ -98,6 +98,22 @@ class SupabaseClient:
         
         return await self.save_thread(thread_state)
     
+    async def update_thread_metadata(self, thread_id: str, metadata_update: Dict[str, Any]) -> bool:
+        """更新thread元数据"""
+        thread_state = await self.get_thread(thread_id)
+        if not thread_state:
+            logger.error(f"尝试更新不存在的thread元数据: {thread_id}")
+            return False
+        
+        # 合并新的元数据
+        if not thread_state.metadata:
+            thread_state.metadata = {}
+        
+        thread_state.metadata.update(metadata_update)
+        thread_state.updated_at = datetime.utcnow().isoformat()
+        
+        return await self.save_thread(thread_state)
+    
     async def save_message(self, thread_id: str, role: str, content: str) -> bool:
         """保存单条消息"""
         try:

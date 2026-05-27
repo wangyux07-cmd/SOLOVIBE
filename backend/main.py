@@ -43,7 +43,8 @@ langgraph_agent = LangGraphAgent()
 
 async def stream_chat_handler(message: str, thread_id: str) -> AsyncGenerator[str, None]:
     """
-    核心流式聊天处理器，模拟LangGraph工作流并实现HITL中断
+    基于PRD的慢生活轨道流式聊天处理器
+    情感感知 → 独享任务生成 → HITL中断点
     """
     try:
         logger.info(f"开始处理thread_id: {thread_id}, message: {message}")
@@ -51,52 +52,91 @@ async def stream_chat_handler(message: str, thread_id: str) -> AsyncGenerator[st
         # 1. 从Supabase恢复或创建thread状态
         thread_state = await supabase_client.get_or_create_thread(thread_id)
         
-        # 2. 发送初始同理心回应
-        empathy_text = f"我理解您的需求：'{message}'，让我为您规划一下最适合的独享体验..."
-        yield f"data: {StreamResponseType.EMPATHY.value} {empathy_text}\n\n"
+        # 2. 通过LangGraph Agent处理消息
+        agent_response = await langgraph_agent.process_message(message, thread_state)
         
-        # 小延迟模拟处理时间
-        await asyncio.sleep(1)
-        
-        # 3. 生成并发送计划
-        sample_plan = {
-            "id": "wander-plan-001",
-            "title": "独自咖啡时光",
-            "category": "休闲放松",
-            "duration": "2小时",
-            "cost": "¥50-80",
-            "area": "三里屯",
-            "quote": "一个人也要好好生活",
-            "highlightTag": "一人友好",
-            "subChips": ["安静", "WiFi", "插座"],
-            "description": "找到一家温馨的独立咖啡店，享受属于自己的静谧时光",
-            "image": "/coffee-shop.jpg"
-        }
-        
-        yield f"data: {StreamResponseType.PLANS.value} {json.dumps(sample_plan, ensure_ascii=False)}\n\n"
-        
-        await asyncio.sleep(1)
-        
-        # 4. 触发风控检查 - 核心HITL中断点
-        risk_assessment = await verify_action_risk(sample_plan, thread_state)
-        
-        if risk_assessment.requires_confirmation:
-            # 更新thread状态为等待确认
-            await supabase_client.update_thread_status(
-                thread_id, 
-                ThreadStatus.WAITING_CONFIRMATION
+        # 3. 处理不同类型的响应
+        if agent_response["type"] == "clarification":
+            # 需要澄清的情况 - 发送同理心回应和选项
+            yield f"data: {StreamResponseType.EMPATHY.value} {agent_response['empathy_response']}\n\n"
+            await asyncio.sleep(0.5)
+            
+            # 发送选项作为计划格式（便于前端解析）
+            options_plan = {
+                "type": "clarification_options",
+                "options": agent_response["options"],
+                "instruction": "请选择最符合您当前心境的选项"
+            }
+            yield f"data: {StreamResponseType.PLANS.value} {json.dumps(options_plan, ensure_ascii=False)}\n\n"
+            
+        elif agent_response["type"] == "complete_response":
+            # 完整响应 - 慢生活轨道流程
+            
+            # 发送同理心回应
+            yield f"data: {StreamResponseType.EMPATHY.value} {agent_response['empathy_response']}\n\n"
+            await asyncio.sleep(0.8)
+            
+            # 发送独享任务（计划）
+            quest_data = {
+                "type": "solo_quest",
+                "id": f"quest-{thread_id}-{int(datetime.utcnow().timestamp())}",
+                **agent_response["quest"]
+            }
+            yield f"data: {StreamResponseType.PLANS.value} {json.dumps(quest_data, ensure_ascii=False)}\n\n"
+            
+            await asyncio.sleep(0.5)
+            
+            # 发送详细方案信息（包含商家、路线、时间等完整数据）
+            if "detailed_scenario" in agent_response:
+                detailed_data = {
+                    "type": "detailed_scenario",
+                    "id": f"scenario-{thread_id}-{int(datetime.utcnow().timestamp())}",
+                    **agent_response["detailed_scenario"]
+                }
+                yield f"data: {StreamResponseType.PLANS.value} {json.dumps(detailed_data, ensure_ascii=False)}\n\n"
+                await asyncio.sleep(0.5)
+            
+            await asyncio.sleep(1)
+            
+            # 发送匿名共鸣信息
+            copresence_info = {
+                "type": "copresence_data",
+                **agent_response["copresence"]
+            }
+            yield f"data: {StreamResponseType.EMPATHY.value} ✨ {copresence_info['message']}\n\n"
+            
+            # 4. 风控检查 - 判断是否需要HITL确认
+            if agent_response["requires_confirmation"]:
+                risk_assessment = await verify_action_risk(quest_data, thread_state)
+                
+                if risk_assessment.requires_confirmation:
+                    # 更新thread状态为等待确认
+                    await supabase_client.update_thread_status(
+                        thread_id, 
+                        ThreadStatus.WAITING_CONFIRMATION
+                    )
+                    
+                    # 发送中断信号给前端
+                    yield f"event: {SSEEventType.INTERRUPT.value}\n"
+                    yield f"data: {StreamResponseType.REQUIRE_USER_CONFIRM.value}\n\n"
+                    
+                    logger.info(f"Thread {thread_id} 进入等待用户确认状态")
+            
+            # 更新用户历史偏好
+            await supabase_client.update_thread_metadata(
+                thread_id,
+                {
+                    "last_successful_vibe": agent_response["quest"]["chips"][0] if agent_response["quest"]["chips"] else "安静角落",
+                    "last_quest_completed": agent_response["quest"]["title"],
+                    "agent_mode_used": agent_response["quest"]["difficulty"]
+                }
             )
-            
-            # 发送中断信号给前端
-            yield f"event: {SSEEventType.INTERRUPT.value}\n"
-            yield f"data: {StreamResponseType.REQUIRE_USER_CONFIRM.value}\n\n"
-            
-            logger.info(f"Thread {thread_id} 进入等待用户确认状态")
         
     except Exception as e:
         logger.error(f"处理消息时出错: {str(e)}")
+        error_message = "抱歉，我的大脑稍微有点断网了 🧠💦。不过别担心，给你推荐去附近的河边散散步、喝一杯醇厚的手冲咖啡吧！"
         yield f"event: {SSEEventType.ERROR.value}\n"
-        yield f"data: 处理消息时发生错误: {str(e)}\n\n"
+        yield f"data: {StreamResponseType.EMPATHY.value} {error_message}\n\n"
 
 
 @app.post("/api/v1/stream_chat", response_model=StreamChatResponse)
