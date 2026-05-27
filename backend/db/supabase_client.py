@@ -4,7 +4,7 @@ from typing import Optional, Dict, Any, List
 from datetime import datetime
 import json
 
-from types import ThreadState, ThreadStatus, CheckpointData
+from data_types import ThreadState, ThreadStatus, CheckpointData
 
 logger = logging.getLogger(__name__)
 

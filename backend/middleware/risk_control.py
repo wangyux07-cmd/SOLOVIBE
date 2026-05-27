@@ -3,7 +3,7 @@ from typing import Dict, Any, List
 from datetime import datetime
 import json
 
-from types import RiskAssessment, ThreadState
+from data_types import RiskAssessment, ThreadState
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

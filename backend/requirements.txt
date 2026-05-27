@@ -1,13 +1,40 @@
+# 基础Web框架
 fastapi==0.104.1
 uvicorn[standard]==0.24.0
 python-dotenv==1.0.0
 pydantic==2.4.2
+
+# 数据库和状态管理
 asyncpg==0.29.0
 supabase==2.2.0
 psycopg2-binary==2.9.9
+
+# AI和对话管理
 langgraph==0.0.30
 langchain==0.1.0
 langchain-openai==0.0.2
+
+# HTTP和网络请求
 python-multipart==0.0.6
 requests==2.31.0
 httpx==0.25.2
+aiohttp==3.9.1
+
+# Web搜索API客户端
+# Note: Tavily官方SDK可能还在开发中，使用时可能需要自定义客户端
+# tavily-python==1.0.0  (如可用)
+
+# 工具和实用库
+aiofiles==23.2.1  # 异步文件操作
+backoff==2.2.0    # 重试装饰器
+python-jose[cryptography]==3.3.0  # JWT处理（如需要）
+
+# 监控和日志
+structlog==23.2.0  # 结构化日志
+prometheus-client==0.19.0  # Prometheus监控（如启用）
+
+# 开发工具
+pytest==7.4.4  # 测试框架
+pytest-asyncio==0.23.3  # 异步测试支持
+black==23.12.1  # 代码格式化
+flake8==6.1.0   # 代码检查

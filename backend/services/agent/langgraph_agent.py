@@ -6,8 +6,11 @@ import re
 from dataclasses import dataclass, asdict
 from enum import Enum
 
-from types import ThreadState, CheckpointData
+from data_types import ThreadState, CheckpointData
 from services.data.scenario_generator import EnhancedScenarioGenerator
+from services.tools.web_search_tool import WebSearchTool, SearchQuery, BusinessInfo
+from services.tools.booking_safety_gate import BookingSafetyGate, BookingRequest, BookingType, RiskAssessment
+from services.tools.booking_execution_tool import BookingExecutionTool, ExecutionFeedback, BookingResult
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +55,9 @@ class LangGraphAgent:
         self.checkpoint_data = {}
         self.emotion_memory = {}
         self.scenario_generator = EnhancedScenarioGenerator()
+        self.web_search_tool = None  # 延迟初始化
+        self.booking_safety_gate = BookingSafetyGate()
+        self.booking_execution_tool = None  # 延迟初始化
         logger.info("LangGraph Agent 初始化完成（慢生活轨道模式）")
     
     async def process_message(self, message: str, thread_state: ThreadState) -> Dict[str, Any]:
@@ -82,29 +88,54 @@ class LangGraphAgent:
         
         # 5. 独享任务映射
         quest_narrative = await self._solo_friendly_quest_mapper(vibe_context, message)
-    
-        # 6. 难度自适应和生成
-        final_quest = await self._difficulty_adapter_and_generator(quest_narrative, vibe_context)
         
-        # 7. 匿名共鸣集成
+        # 6. 生成完整详细方案
+        detailed_scenario = await self._generate_detailed_scenario(vibe_context, message, quest_narrative)
+        
+        # 7. 实时信息检索（如果需要）
+        updated_scenario = await self._real_time_info_retrieval(detailed_scenario, message)
+        
+        # 8. 预订需求评估
+        booking_assessment = await self._assess_booking_requirements(updated_scenario, message)
+        
+        # 8. 匿名共鸣集成
         copresence_info = await self._generate_copresense_enhancement(thread_state)
         
         # 保存完整的状态检查点
         await self._save_enhanced_checkpoint(thread_state.thread_id, {
             "emotion_profile": asdict(emotion_profile),
             "vibe_context": asdict(vibe_context),
-            "quest_narrative": asdict(final_quest),
+            "quest_narrative": asdict(quest_narrative),
+            "detailed_scenario": detailed_scenario,
+            "updated_scenario": updated_scenario,
+            "booking_assessment": booking_assessment,
             "copresence": copresence_info,
             "last_message": message
         })
         
-        return {
+        # 转换详细方案为API格式
+        api_scenario = self.scenario_generator.convert_to_api_format(detailed_scenario)
+        
+        # 更新方案包含实时信息（如果获取成功）
+        final_scenario = api_scenario
+        if updated_scenario and hasattr(updated_scenario, 'detailed_scenario'):
+            final_scenario = updated_scenario  # 使用更新后的方案
+        
+        result = {
             "type": "complete_response",
             "empathy_response": empathy_response,
-            "quest": asdict(final_quest),
+            "quest": asdict(quest_narrative),
+            "detailed_scenario": final_scenario,
             "copresence": copresence_info,
-            "requires_confirmation": self._check_execution_safety(final_quest)
+            "requires_confirmation": False  # 默认不需要确认
         }
+        
+        # 添加预订相关信息（如果需要预订）
+        if booking_assessment and booking_assessment.get("requires_booking"):
+            result["booking_info"] = booking_assessment
+            result["requires_confirmation"] = booking_assessment.get("needs_confirmation", False)
+        
+        return result
 
     async def _emotion_sensing(self, message: str, thread_state: ThreadState) -> EmotionProfile:
         """情感感知节点 - 分析用户心境状态"""
@@ -319,6 +350,212 @@ class LangGraphAgent:
         
         logger.info(f"难度自适应调整完成 - 新难度: {quest.difficulty}")
         return quest
+    
+    async def _generate_detailed_scenario(self, 
+                                        vibe_context, 
+                                        user_message: str, 
+                                        quest_narrative) -> Any:
+        """生成详细完整方案"""
+        # 根据心境选择合适的方案模式
+        mode_mapping = {
+            "healing": "healing",
+            "light": "healing", 
+            "deep": "exploration"
+        }
+        
+        scenario_mode = mode_mapping.get(vibe_context.mode.value, "healing")
+        
+        # 生成完整详细的出游场景
+        detailed_scenario = self.scenario_generator.generate_complete_enhanced_scenario(
+            user_message, scenario_mode
+        )
+        
+        logger.info(f"详细方案生成完成 - 商家: {detailed_scenario.merchant.name}")
+        return detailed_scenario
+    
+    async def _real_time_info_retrieval(self, 
+                                      detailed_scenario: Any,
+                                      user_message: str) -> Dict[str, Any]:
+        """实时信息检索节点 - 获取商家最新状态"""
+        if not hasattr(detailed_scenario, 'detailed_scenario'):
+            logger.info("跳过实时信息检索 - 无详细方案数据")
+            return None
+        
+        scenario_data = detailed_scenario.detailed_scenario if hasattr(detailed_scenario, 'detailed_scenario') else detailed_scenario
+        
+        # 延迟初始化Web搜索工具
+        if self.web_search_tool is None:
+            self.web_search_tool = WebSearchTool()
+        
+        try:
+            merchant_name = scenario_data.get('merchant_info', {}).get('name', '')
+            merchant_address = scenario_data.get('merchant_info', {}).get('address', '')
+            
+            if not merchant_name or not merchant_address:
+                logger.info("跳过实时信息检索 - 缺少商家信息")
+                return scenario_data
+            
+            logger.info(f"开始检索实时信息 - 商家: {merchant_name}")
+            
+            # 创建异步上下文
+            async with self.web_search_tool as search_tool:
+                # 搜索商家营业状态
+                status_query = SearchQuery(
+                    query=merchant_name,
+                    location=merchant_address,
+                    search_type="business_status"
+                )
+                
+                business_info = await search_tool.search_business_info(status_query)
+                
+                # 如果商家当前关闭或状态异常，更新方案
+                if not business_info.is_open or business_info.current_status != "open":
+                    logger.info(f"商家状态异常 - {merchant_name}: {business_info.current_status}")
+                    
+                    # 更新方案信息
+                    updated_scenario = scenario_data.copy()
+                    updated_scenario['merchant_info']['real_time_status'] = {
+                        'is_open': business_info.is_open,
+                        'current_status': business_info.current_status,
+                        'last_updated': business_info.last_updated,
+                        'safety_info': business_info.safety_info
+                    }
+                    
+                    # 添加特殊提示
+                    if not business_info.is_open:
+                        updated_scenario['merchant_info']['recommendations'] = [
+                            "商家当前暂未营业，建议改期前往",
+                            f"营业时间建议致电确认: {scenario_data.get('merchant_info', {}).get('contact', '未提供')}",
+                            "或选择备选方案"
+                        ]
+                    
+                    return updated_scenario
+        
+        except Exception as e:
+            logger.error(f"实时信息检索失败: {e}")
+            # 实时信息获取失败不影响整体流程，返回原始方案
+        
+        return scenario_data
+    
+    async def _assess_booking_requirements(self, 
+                                         detailed_scenario: Any,
+                                         user_message: str) -> Optional[Dict[str, Any]]:
+        """评估预订需求 - 判断是否需要执行预订"""
+        scenario_data = detailed_scenario
+        if hasattr(detailed_scenario, 'detailed_scenario'):
+            scenario_data = detailed_scenario.detailed_scenario
+        
+        try:
+            merchant_info = scenario_data.get('merchant_info', {})
+            cost_info = scenario_data.get('cost_breakdown', {})
+            
+            # 判断是否需要预订
+            booking_indicators = [
+                "预订" in user_message or "预约" in user_message,
+                cost_info.get('consumption', 0) > 50,  # 消费超过50元
+                merchant_info.get('type') in ['餐厅', '咖啡店'],  # 需要预订的场所
+                "指定时间" in user_message or "特定时间" in user_message
+            ]
+            
+            if not any(booking_indicators):
+                logger.info("无需预订 - 用户未明确要求或不符合预订条件")
+                return None
+            
+            # 构建预订请求
+            booking_request = BookingRequest(
+                booking_type=self._map_merchant_type_to_booking(merchant_info.get('type')),
+                merchant_name=merchant_info.get('name', ''),
+                location=merchant_info.get('address', ''),
+                estimated_cost=float(cost_info.get('consumption', 0)),
+                planned_time=datetime.now().isoformat(),  # 默认现在
+                estimated_duration=90,  # 默认90分钟
+                requires_external_api=True,
+                api_provider="meituan",  # 默认为美团
+                special_requirements=self._extract_special_requirements(user_message)
+            )
+            
+            # 执行风险评估
+            risk_assessment = await self.booking_safety_gate.assess_booking_risk(booking_request)
+            
+            assessment_result = {
+                "requires_booking": True,
+                "needs_confirmation": risk_assessment.requires_confirmation,
+                "risk_level": risk_assessment.overall_level.value,
+                "risk_score": risk_assessment.risk_score,
+                "booking_request": {
+                    "type": booking_request.booking_type.value,
+                    "merchant": booking_request.merchant_name,
+                    "estimated_cost": booking_request.estimated_cost,
+                    "planned_time": booking_request.planned_time
+                },
+                "risk_assessment": {
+                    "level": risk_assessment.overall_level.value,
+                    "factors": [factor.__dict__ for factor in risk_assessment.risk_factors],
+                    "recommendation": risk_assessment.recommendation,
+                    "mitigation_suggestions": risk_assessment.mitigation_suggestions
+                }
+            }
+            
+            logger.info(f"预订需求评估完成 - 需要确认: {risk_assessment.requires_confirmation}")
+            return assessment_result
+            
+        except Exception as e:
+            logger.error(f"预订需求评估失败: {e}")
+            return {
+                "requires_booking": False,
+                "error": f"预订评估失败: {str(e)}"
+            }
+    
+    def _map_merchant_type_to_booking(self, merchant_type: str) -> BookingType:
+        """映射商家类型到预订类型"""
+        type_mapping = {
+            "咖啡店": BookingType.RESTAURANT,
+            "餐厅": BookingType.RESTAURANT,
+            "健身中心": BookingType.ENTERTAINMENT,
+            "艺术中心": BookingType.ENTERTAINMENT,
+            "SPA中心": BookingType.ENTERTAINMENT
+        }
+        return type_mapping.get(merchant_type, BookingType.RESTAURANT)
+    
+    def _extract_special_requirements(self, user_message: str) -> List[str]:
+        """从用户消息中提取特殊要求"""
+        requirements = []
+        
+        requirement_patterns = {
+            "靠窗位置": ["靠窗", "窗户", "窗边"],
+            "安静位置": ["安静", "僻静", "不被打扰"],
+            "预订座位": ["预订座位", "预留位置"],
+            "特殊饮食": ["素食", "无糖", "过敏"],
+            "庆祝活动": ["生日", "庆祝", "浪漫"]
+        }
+        
+        for requirement, patterns in requirement_patterns.items():
+            if any(pattern in user_message for pattern in patterns):
+                requirements.append(requirement)
+        
+        return requirements
+    
+    def _check_execution_safety(self, scenario) -> bool:
+        """检查执行安全性 - 判断是否需要HITL确认"""
+        # 高风险判断标准
+        risk_indicators = []
+        
+        # 检查费用超过阈值
+        if hasattr(scenario, 'cost_breakdown'):
+            if scenario.cost_breakdown.total > 100:
+                risk_indicators.append("费用较高")
+        
+        # 检查时长过长
+        if hasattr(scenario, 'route'):
+            if scenario.route.total_duration > 180:  # 3小时以上
+                risk_indicators.append("时间过长")
+        
+        # 检查商家类型是否需要确认
+        high_risk_types = ["艺术中心", "博物馆", "高端餐厅"]
+        if scenario.merchant.type.value in high_risk_types:
+            risk_indicators.append("特殊体验类型")
+        
+        return len(risk_indicators) > 0
 
     async def _generate_copresense_enhancement(self, thread_state: ThreadState) -> dict:
         """生成匿名共鸣增强信息"""
@@ -341,16 +578,7 @@ class LangGraphAgent:
             "message": f"今天同城已有 {city_totals} 人漫游出门，附近 3km 有 {nearby_count} 人正在独处打卡中"
         }
 
-    def _check_execution_safety(self, quest: QuestNarrative) -> bool:
-        """检查执行安全性 - 判断是否需要HITL确认"""
-        # 高风险任务需要确认
-        risk_indicators = [
-            "深度体验" in quest.difficulty,
-            "品质" in quest.title,
-            int(re.findall(r'\d+', quest.duration)[0]) > 60 if re.findall(r'\d+', quest.duration) else False
-        ]
-        
-        return any(risk_indicators)
+    # 已更新为使用详细方案的安全检查方法
 
     async def _save_enhanced_checkpoint(self, thread_id: str, state_data: dict) -> bool:
         """保存增强检查点"""

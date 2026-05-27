@@ -7,7 +7,7 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from db.supabase_client import SupabaseClient
-from types import ThreadState, ThreadStatus
+from data_types import ThreadState, ThreadStatus
 from datetime import datetime
 
 
@@ -103,7 +103,7 @@ async def test_message_persistence():
 
 async def test_checkpoint_persistence():
     """测试检查点持久化功能"""
-    from types import CheckpointData
+    from data_types import CheckpointData
     
     client = SupabaseClient()
     

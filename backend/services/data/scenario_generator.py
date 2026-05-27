@@ -1,14 +1,20 @@
 """
-完整的场景方案生成器 - 整合商家信息和路线规划，生成完整细致的出游方案
-包含时间表、费用明细、活动建议等全部细节
+完整的场景方案生成器 - 高德地图POI数据源适配版本
+整合高德地图POI搜索结果和路径规划，生成完整细致的出游方案
 """
 
 from dataclasses import dataclass, asdict
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Union
 import random
 import json
+import logging
 from datetime import datetime, timedelta
+import hashlib
 
+# 导入高德地图相关的数据结构
+from ..tools.booking_execution_tool import (
+    AmapPoiResult, AmapRouteResult, AmapExecutionTool
+)
 from .merchant_database import (
     Merchant, MerchantType, COFFEE_SHOPS, 
     RESTAURANTS, PARK_LANDSCAPES, BOOKSTORES,
@@ -56,6 +62,22 @@ class SafetyInfo:
 
 
 @dataclass
+class AmapScenario:
+    """高德版方案数据类"""
+    scenario_id: str
+    title: str
+    poi_info: AmapPoiResult  # 高德POI数据
+    route_info: AmapRouteResult  # 高德路径数据
+    weather: WeatherInfo
+    cost_breakdown: CostBreakdown
+    detailed_itinerary: List[Dict[str, Any]]
+    nearby_recommendations: List[NearbyRecommendation]
+    safety_info: SafetyInfo
+    personalization_notes: Dict[str, str]
+    backup_options: List[Dict[str, Any]]
+
+
+@dataclass
 class CompleteScenario:
     """完整出游方案"""
     scenario_id: str
@@ -73,7 +95,8 @@ class CompleteScenario:
 
 class EnhancedScenarioGenerator:
     """
-    增强版场景生成器 - 提供极其详细的出游方案
+    增强版场景生成器 - 高德地图POI数据适配版本
+    支持传统合成数据和高德API数据的统一处理
     """
     
     def __init__(self):
@@ -85,6 +108,252 @@ class EnhancedScenarioGenerator:
             "hot": ["炎热", "气温偏高", "选择有空调的场所，注意防暑"],
             "cold": ["寒冷", "气温偏低", "注意保暖，选择温暖场所"]
         }
+        
+        # 高德地图执行工具（用于实时数据查询）
+        self.amap_tool = None
+        
+    def _convert_amap_to_merchant(self, amap_poi: AmapPoiResult) -> Merchant:
+        """将高德POI数据转换为Merchant对象"""
+        # 解析坐标
+        try:
+            lng, lat = amap_poi.location.split(',')
+            lng, lat = float(lng), float(lat)
+        except (ValueError, AttributeError):
+            lng, lat = 116.397470, 39.908823  # 默认位置
+        
+        # 确定商家类型
+        poi_type_mapping = {
+            "05": MerchantType.COFFEE_SHOP,  # 餐饮相关
+            "06": MerchantType.RESTAURANT,   # 购物相关  
+            "08": MerchantType.BOOKSTORE,    # 文化相关
+            "10": MerchantType.PARK,         # 公共设施
+        }
+        
+        merchant_type = MerchantType.COFFEE_SHOP  # 默认
+        if amap_poi.typecode:
+            type_prefix = amap_poi.typecode[:2]
+            merchant_type = poi_type_mapping.get(type_prefix, MerchantType.COFFEE_SHOP)
+        
+        # 解析距离
+        try:
+            distance = float(amap_poi.distance) if amap_poi.distance else 1000
+        except (ValueError, TypeError):
+            distance = 1000
+        
+        # 创建Location对象
+        from .merchant_database import Location
+        location = Location(
+            address=amap_poi.address,
+            city="北京",  # 可从POI数据中提取
+            area=amap_poi.business_area or "附近商圈",
+            latitude=lat,
+            longitude=lng
+        )
+        
+        # 生成基础特征
+        features = self._extract_features_from_poi(amap_poi)
+        
+        # 创建Merchant对象
+        merchant = Merchant(
+            id=amap_poi.id or f"amap_{hashlib.md5(amap_poi.name.encode()).hexdigest()[:8]}",
+            name=amap_poi.name,
+            type=merchant_type,
+            location=location,
+            rating=float(amap_poi.rating) if amap_poi.rating else 4.5,
+            price_level=self._get_price_level(amap_poi.cost),
+            features=features,
+            contact=amap_poi.tel,
+            operating_hours=self._generate_operating_hours(),
+            solo_friendly=True,  # 高德数据默认友好
+            distance=distance,
+            menu=self._generate_sample_menu(merchant_type),
+            packages=self._generate_sample_packages(merchant_type)
+        )
+        
+        return merchant
+    
+    def _convert_amap_to_route(self, amap_route: AmapRouteResult, 
+                              start_location: str = None) -> DetailedRoute:
+        """将高德路径数据转换为DetailedRoute对象"""
+        from .route_generator import (
+            DetailedRoute, RouteSegment, TransportOption, 
+            TimeSlot, TransportType
+        )
+        
+        try:
+            distance_km = float(amap_route.distance) / 1000 if amap_route.distance else 0
+            duration_minutes = float(amap_route.duration) / 60 if amap_route.duration else 0
+        except (ValueError, TypeError):
+            distance_km = 0
+            duration_minutes = 0
+        
+        # 确定交通方式
+        transport_type = TransportType.TRANSIT  # 默认
+        transport_desc = "智能推荐路线"
+        
+        # 根据费用判断交通方式
+        if amap_route.taxi_cost and float(amap_route.taxi_cost) > 0:
+            transport_type = TransportType.DRIVING
+            transport_desc = "驾车出行"
+        
+        # 创建交通选项
+        transport = TransportOption(
+            type=transport_type,
+            description=transport_desc,
+            duration=int(duration_minutes),
+            cost=round(float(amap_route.taxi_cost or 0), 2),
+            carbon_footprint=round(distance_km * 0.21, 2),  # 估算碳排放
+            comfort_level=4 if transport_type == TransportType.DRIVING else 3
+        )
+        
+        # 创建时间槽
+        current_time = datetime.now()
+        time_slot = TimeSlot(
+            start_time=0,
+            end_time=int(duration_minutes),
+            description="前往目的地",
+            efficiency=0.9
+        )
+        
+        # 创建路由段
+        route_segment = RouteSegment(
+            from_location=start_location or "出发地",
+            to_location="目的地",
+            distance=distance_km,
+            transport=transport,
+            time_breakdown=[time_slot],
+            instructions=self._parse_amap_steps(amap_route.steps),
+            alternatives=[]
+        )
+        
+        # 创建完整路线
+        route = DetailedRoute(
+            route_segments=[route_segment],
+            total_distance=distance_km,
+            total_duration=int(duration_minutes),
+            total_cost=transport.cost,
+            carbon_savings=max(0, 5.0 - transport.carbon_footprint),  # 估算碳节约
+            time_schedule=[time_slot],
+            optimization_tips=self._get_route_tips(distance_km, duration_minutes)
+        )
+        
+        return route
+    
+    def _extract_features_from_poi(self, amap_poi: AmapPoiResult) -> List[str]:
+        """从高德POI提取场所特征"""
+        base_features = []
+        
+        # 根据POI类型添加特征
+        if "咖啡" in amap_poi.type or "0501" in amap_poi.typecode:
+            base_features.extend(["咖啡香浓", "环境安静", "适合独处", "轻音乐"])
+        elif "餐厅" in amap_poi.type or "0502" in amap_poi.typecode:
+            base_features.extend(["美食丰富", "服务态度好", "用餐环境", "性价比高"])
+        elif "书店" in amap_poi.type or "0802" in amap_poi.typecode:
+            base_features.extend(["图书丰富", "阅读环境", "文艺氛围", "安静角落"])
+        elif "公园" in amap_poi.type or "1001" in amap_poi.typecode:
+            base_features.extend(["自然风光", "空气清新", "散步好去处", "休闲放松"])
+        
+        # 如果没有匹配到特定类型，添加通用特征
+        if not base_features:
+            base_features = ["环境优美", "适合休闲", "交通便利", "服务态度好"]
+        
+        return base_features
+    
+    def _get_price_level(self, cost_str: str) -> int:
+        """根据费用字符串确定价格等级"""
+        try:
+            cost = float(cost_str)
+            if cost < 30:
+                return 1  # 经济型
+            elif cost < 80:
+                return 2  # 中等
+            else:
+                return 3  # 高端
+        except (ValueError, TypeError):
+            return 2  # 默认中等
+    
+    def _generate_operating_hours(self):
+        """生成营业时间"""
+        from .merchant_database import OperatingHours
+        return OperatingHours(
+            monday="09:00-22:00",
+            tuesday="09:00-22:00", 
+            wednesday="09:00-22:00",
+            thursday="09:00-22:00",
+            friday="09:00-22:00",
+            saturday="09:00-22:00",
+            sunday="09:00-22:00"
+        )
+    
+    def _generate_sample_menu(self, merchant_type: MerchantType):
+        """生成示例菜单"""
+        from .merchant_database import MenuItem
+        
+        if merchant_type == MerchantType.COFFEE_SHOP:
+            return [
+                MenuItem(name="手冲单品咖啡", description="精选单品豆，现磨现冲", price=35.0),
+                MenuItem(name="经典美式", description="浓郁香醇，唤醒活力", price=22.0)
+            ]
+        elif merchant_type == MerchantType.RESTAURANT:
+            return [
+                MenuItem(name="招牌套餐", description="精选主菜+汤品+小菜", price=68.0),
+                MenuItem(name="轻食沙拉", description="新鲜蔬菜，健康首选", price=32.0)
+            ]
+        else:
+            return []
+    
+    def _generate_sample_packages(self, merchant_type: MerchantType):
+        """生成示例套餐"""
+        from .merchant_database import PackageDeal
+        
+        if merchant_type == MerchantType.COFFEE_SHOP:
+            return [
+                PackageDeal(
+                    name="午后悠闲套餐",
+                    items=["咖啡+甜点"],
+                    original_price=58.0,
+                    discounted_price=48.0,
+                    description="享受慢时光的完美组合"
+                )
+            ]
+        else:
+            return []
+    
+    def _parse_amap_steps(self, steps: List[Dict[str, Any]]) -> List[str]:
+        """解析高德路径规划步骤"""
+        if not steps:
+            return ["按照导航前行"]
+        
+        instructions = []
+        for step in steps:
+            instruction = step.get("instruction", "")
+            if instruction:
+                # 清理高德返回的HTML标签
+                import re
+                clean_instruction = re.sub(r'<[^>]+>', '', instruction)
+                instructions.append(clean_instruction)
+        
+        if not instructions:
+            instructions = ["按照导航提示前往目的地"]
+        
+        return instructions
+    
+    def _get_route_tips(self, distance: float, duration: float) -> List[str]:
+        """生成路线优化建议"""
+        tips = []
+        
+        if duration > 60:
+            tips.append("建议选择公共交通工具，更省时便捷")
+        
+        if distance < 2:
+            tips.append("距离较近，步行是个不错的选择")
+        
+        if distance > 10:
+            tips.append("距离较远，建议预留充足时间")
+        
+        tips.append("路上注意安全，保持好心情")
+        
+        return tips
     
     def generate_weather_info(self) -> WeatherInfo:
         """生成天气信息"""
@@ -460,17 +729,26 @@ class EnhancedScenarioGenerator:
     
     def generate_complete_enhanced_scenario(self, 
                                           user_message: str, 
-                                          vibe_mode: str = "healing") -> CompleteScenario:
-        """生成完整的增强版出游方案"""
+                                          vibe_mode: str = "healing",
+                                          amap_poi: AmapPoiResult = None,
+                                          amap_route: AmapRouteResult = None) -> CompleteScenario:
+        """生成完整的增强版出游方案 - 支持高德数据和传统数据源"""
         
-        # 生成基础场景
-        if vibe_mode == "exploration":
-            base_scenario = self.scenario_generator.generate_exploration_scenario(user_message)
+        # 数据源选择逻辑
+        if amap_poi and amap_route:
+            # 使用高德实时数据
+            logging.info(f"使用高德POI数据生成方案: {amap_poi.name}")
+            merchant = self._convert_amap_to_merchant(amap_poi)
+            route = self._convert_amap_to_route(amap_route, "当前位置")
         else:
-            base_scenario = self.scenario_generator.generate_healing_scenario(user_message)
-        
-        merchant = base_scenario["merchant"]
-        route = base_scenario["route"]
+            # 使用传统合成数据
+            if vibe_mode == "exploration":
+                base_scenario = self.scenario_generator.generate_exploration_scenario(user_message)
+            else:
+                base_scenario = self.scenario_generator.generate_healing_scenario(user_message)
+            
+            merchant = base_scenario["merchant"]
+            route = base_scenario["route"]
         
         # 生成各类详细数据
         weather = self.generate_weather_info()
@@ -519,6 +797,161 @@ class EnhancedScenarioGenerator:
         
         return "任何时间都适合，根据你的心情决定"
     
+    # ==================== 高德地图专用方案生成方法 ==================== #
+    
+    def generate_amap_enhanced_scenario(self,
+                                       amap_poi: AmapPoiResult,
+                                       amap_route: AmapRouteResult,
+                                       user_message: str,
+                                       vibe_mode: str = "healing") -> AmapScenario:
+        """生成高德地图专用版出游方案
+        
+        Args:
+            amap_poi: 高德地图POI搜索结果
+            amap_route: 高德地图路径规划结果  
+            user_message: 用户原始需求信息
+            vibe_mode: 氛围模式(healing/exploration)
+            
+        Returns:
+            AmapScenario: 高德版完整场景方案
+        """
+        logging.info(f"生成高德专用方案: {amap_poi.name} - {amap_poi.type}")
+        
+        # 直接使用高德数据生成方案
+        scenario_id = f"amap-{datetime.now().strftime('%Y%m%d%H%M%S')}-{hashlib.md5(amap_poi.id.encode()).hexdigest()[:8]}"
+        
+        title = f"{amap_poi.name} - {self._get_scenario_type(amap_poi, vibe_mode)}"
+        
+        # 生成各类详细数据
+        weather = self.generate_weather_info()
+        
+        # 创建Merchant对象用于数据生成
+        merchant = self._convert_amap_to_merchant(amap_poi)
+        route = self._convert_amap_to_route(amap_route, "当前位置")
+        
+        cost_breakdown = self.generate_cost_breakdown(route, merchant)
+        detailed_itinerary = self.generate_detailed_itinerary(merchant, route, weather)
+        nearby_recommendations = self.generate_nearby_recommendations(merchant)
+        safety_info = self.generate_safety_info(merchant)
+        backup_options = self.generate_backup_options(merchant)
+        
+        personalization_notes = {
+            "best_visit_time": self._get_best_visit_time(merchant, weather),
+            "mood_boosting_tips": self._get_mood_tips(merchant, user_message),
+            "photography_spots": self._get_photography_suggestions(merchant),
+            "social_distance_advice": "选择角落位置，享受独处时光" if merchant.solo_friendly else "可适当选择人少时段",
+            "amap_specific_notes": f"高德评分: {amap_poi.rating} | 距离: {amap_poi.distance}m | 商圈: {amap_poi.business_area}"
+        }
+        
+        return AmapScenario(
+            scenario_id=scenario_id,
+            title=title,
+            poi_info=amap_poi,
+            route_info=amap_route,
+            weather=weather,
+            cost_breakdown=cost_breakdown,
+            detailed_itinerary=detailed_itinerary,
+            nearby_recommendations=nearby_recommendations,
+            safety_info=safety_info,
+            personalization_notes=personalization_notes,
+            backup_options=backup_options
+        )
+    
+    def _get_scenario_type(self, amap_poi: AmapPoiResult, vibe_mode: str) -> str:
+        """根据高德POI数据和氛围模式确定场景类型"""
+        if "咖啡" in amap_poi.type or "0501" in amap_poi.typecode:
+            return "咖啡治愈" if vibe_mode == "healing" else "咖啡探索"
+        elif "餐厅" in amap_poi.type or "0502" in amap_poi.typecode:
+            return "美食治愈" if vibe_mode == "healing" else "美食品鉴"
+        elif "书店" in amap_poi.type or "0802" in amap_poi.typecode:
+            return "阅读时光" if vibe_mode == "healing" else "文化探索"
+        elif "公园" in amap_poi.type or "1001" in amap_poi.typecode:
+            return "自然治愈" if vibe_mode == "healing" else "城市漫步"
+        else:
+            return "休闲治愈" if vibe_mode == "healing" else "城市探索"
+    
+    def convert_amap_scenario_to_traditional(self, amap_scenario: AmapScenario) -> CompleteScenario:
+        """将高德方案转换为传统方案格式以保持兼容性
+        
+        Args:
+            amap_scenario: 高德专用方案
+            
+        Returns:
+            CompleteScenario: 传统格式方案
+        """
+        # 转换数据格式
+        merchant = self._convert_amap_to_merchant(amap_scenario.poi_info)
+        route = self._convert_amap_to_route(amap_scenario.route_info, "当前位置")
+        
+        return CompleteScenario(
+            scenario_id=amap_scenario.scenario_id,
+            title=amap_scenario.title,
+            merchant=merchant,
+            route=route,
+            weather=amap_scenario.weather,
+            cost_breakdown=amap_scenario.cost_breakdown,
+            detailed_itinerary=amap_scenario.detailed_itinerary,
+            nearby_recommendations=amap_scenario.nearby_recommendations,
+            safety_info=amap_scenario.safety_info,
+            personalization_notes=amap_scenario.personalization_notes,
+            backup_options=amap_scenario.backup_options
+        )
+    
+    def convert_to_unified_api_format(self, scenario: Union[CompleteScenario, AmapScenario]) -> Dict[str, Any]:
+        """统一API输出格式 - 支持两种数据源
+        
+        Args:
+            scenario: 方案对象（传统或高德格式）
+            
+        Returns:
+            Dict: 统一的API输出格式
+        """
+        if isinstance(scenario, AmapScenario):
+            # 高德方案数据
+            return self._convert_amap_scenario_to_api_format(scenario)
+        else:
+            # 传统方案数据
+            return self.convert_to_api_format(scenario)
+    
+    def _convert_amap_scenario_to_api_format(self, scenario: AmapScenario) -> Dict[str, Any]:
+        """高德方案转API格式"""
+        return {
+            "scenario_id": scenario.scenario_id,
+            "title": scenario.title,
+            "poi_info": {
+                "id": scenario.poi_info.id,
+                "name": scenario.poi_info.name,
+                "address": scenario.poi_info.address,
+                "location": scenario.poi_info.location,
+                "type": scenario.poi_info.type,
+                "typecode": scenario.poi_info.typecode,
+                "distance": scenario.poi_info.distance,
+                "rating": scenario.poi_info.rating,
+                "cost": scenario.poi_info.cost,
+                "business_area": scenario.poi_info.business_area,
+                "photos": scenario.poi_info.photos
+            },
+            "route_info": {
+                "distance": scenario.route_info.distance,
+                "duration": scenario.route_info.duration,
+                "taxi_cost": scenario.route_info.taxi_cost,
+                "steps_count": len(scenario.route_info.steps)
+            },
+            "cost_breakdown": asdict(scenario.cost_breakdown),
+            "weather": {
+                "condition": scenario.weather.condition,
+                "temperature": f"{scenario.weather.temperature}°C",
+                "recommendation": scenario.weather.recommendation
+            },
+            "detailed_itinerary": scenario.detailed_itinerary,
+            "nearby_recommendations": [asdict(r) for r in scenario.nearby_recommendations],
+            "safety_info": asdict(scenario.safety_info),
+            "personalization_notes": scenario.personalization_notes,
+            "backup_options": scenario.backup_options,
+            "data_source": "amap_real_time",
+            "generated_at": datetime.now().isoformat()
+        }
+    
     def _get_mood_tips(self, merchant: Merchant, user_message: str) -> str:
         """获取心情提升建议"""
         tips = {
@@ -553,7 +986,13 @@ class EnhancedScenarioGenerator:
                 "rating": scenario.merchant.rating,
                 "features": scenario.merchant.features,
                 "price_level": "¥" * scenario.merchant.price_level,
-                "solo_friendly": scenario.merchant.solo_friendly
+                "solo_friendly": scenario.merchant.solo_friendly,
+                "location": {
+                    "latitude": scenario.merchant.location.latitude,
+                    "longitude": scenario.merchant.location.longitude,
+                    "city": scenario.merchant.location.city,
+                    "area": scenario.merchant.location.area
+                }
             },
             "route_summary": {
                 "distance": f"{scenario.route.total_distance}公里",
@@ -572,5 +1011,7 @@ class EnhancedScenarioGenerator:
             "safety_info": asdict(scenario.safety_info),
             "personalization_notes": scenario.personalization_notes,
             "backup_options": scenario.backup_options,
-            "carbon_savings": scenario.route.carbon_savings
+            "carbon_savings": scenario.route.carbon_savings,
+            "data_source": "synthetic",
+            "generated_at": datetime.now().isoformat()
         }
