@@ -103,3 +103,13 @@ export interface ResumeThreadResponse {
   thread_id: string;
   status: ThreadStatus;
 }
+
+// 地图相关类型
+export interface MapInstancePin {
+  id: string;
+  name: string;
+  lat: number;
+  lng: number;
+  category?: string;
+  description?: string;
+}
