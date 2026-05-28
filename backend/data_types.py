@@ -60,6 +60,30 @@ class WanderPlan(BaseModel):
     subChips: List[str]
     description: str
     image: str
+    soloIndex: Optional[SoloIndexDimensions] = None  # 单人友好指数六维度评分
+
+
+class MerchantRecommendation(BaseModel):
+    """商家推荐详情"""
+    name: str  # 商家名称
+    address: str  # 地址
+    distance: str  # 距离
+    rating: float  # 评分
+    solo_seats: int  # 单人座位数量
+    quiet_score: float  # 安静度评分
+    phone: Optional[str] = None  # 联系电话
+
+
+class UnifiedWanderPlan(BaseModel):
+    """统一漫游计划 - 新版PRD的CityStrollPackage结构"""
+    id: str
+    title: str
+    emoji: str
+    subtitle: str
+    vibe_tags: List[str]
+    estimated_time: str
+    solo_index: Optional[SoloIndexDimensions] = None
+    merchant_recommendations: List[MerchantRecommendation] = []
 
 
 class RiskAssessment(BaseModel):

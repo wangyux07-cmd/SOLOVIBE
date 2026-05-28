@@ -400,6 +400,93 @@ async def health_check():
     }
 
 
+@app.get("/api/v2/wander-plans")
+async def get_wander_plans():
+    """
+    获取三种不同方案的UnifiedWanderPlans - 用于新版方案选择页面
+    """
+    try:
+        # 模拟三种不同方案的数据，符合新版PRD要求
+        healing_solo_index = {
+            "single_seat_friendly": 0.9,
+            "environment_quietness": 0.8,
+            "solo_package_support": 0.7,
+            "no_awkwardness": 0.9,
+            "safety_rating": 0.8,
+            "accessibility": 0.7
+        }
+        
+        explore_solo_index = {
+            "single_seat_friendly": 0.7,
+            "environment_quietness": 0.6,
+            "solo_package_support": 0.8,
+            "no_awkwardness": 0.8,
+            "safety_rating": 0.9,
+            "accessibility": 0.9
+        }
+        
+        free_solo_index = {
+            "single_seat_friendly": 0.8,
+            "environment_quietness": 0.9,
+            "solo_package_support": 0.9,
+            "no_awkwardness": 0.8,
+            "safety_rating": 0.7,
+            "accessibility": 0.6
+        }
+
+        cafe_recommendation = {
+            "name": "滨江治愈咖啡馆",
+            "address": "滨江区滨江大道123号",
+            "distance": "步行5分钟",
+            "rating": 4.8,
+            "solo_seats": 8,
+            "quiet_score": 0.85,
+            "phone": "021-12345678"
+        }
+
+        plans = [
+            {
+                "id": "healing-riverside",
+                "title": "滨江治愈漫步",
+                "emoji": "🌊",
+                "subtitle": "听流水声发呆，喂鸽子，吹风15分钟",
+                "vibe_tags": ["治愈", "发呆", "低能耗"],
+                "estimated_time": "45-60min",
+                "solo_index": healing_solo_index,
+                "merchant_recommendations": [cafe_recommendation]
+            },
+            {
+                "id": "explore-artstreet",
+                "title": "艺术街区漫游",
+                "emoji": "🎨",
+                "subtitle": "街头涂鸦，独立咖啡，小众设计师店",
+                "vibe_tags": ["探索", "创意", "拍照"],
+                "estimated_time": "90-120min",
+                "solo_index": explore_solo_index,
+                "merchant_recommendations": [cafe_recommendation]
+            },
+            {
+                "id": "quiet-park",
+                "title": "公园长椅计划",
+                "emoji": "🌳",
+                "subtitle": "零开销放空，风中读诗，免费治愈",
+                "vibe_tags": ["免费", "阅读", "自然"],
+                "estimated_time": "30-45min",
+                "solo_index": free_solo_index,
+                "merchant_recommendations": []
+            }
+        ]
+        
+        return {
+            "success": True,
+            "data": plans
+        }
+        
+    except Exception as e:
+        logger.error(f"获取漫游方案时出错: {str(e)}")
+        raise HTTPException(status_code=500, detail="获取漫游方案失败")
+
+
 if __name__ == "__main__":
     uvicorn.run(
         "main:app",
