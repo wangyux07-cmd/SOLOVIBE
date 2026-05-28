@@ -13,6 +13,8 @@ psycopg2-binary==2.9.9
 langgraph==0.0.30
 langchain==0.1.0
 langchain-openai==0.0.2
+# Google Gemini API (支持Gemini 2.5 Pro)
+google-generativeai>=0.7.0
 
 # HTTP和网络请求
 python-multipart==0.0.6

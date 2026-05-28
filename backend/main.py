@@ -1,6 +1,9 @@
 import asyncio
 import json
 import logging
+import os
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 from datetime import datetime
 from typing import AsyncGenerator, Dict, Any
 
@@ -17,9 +20,167 @@ from db.supabase_client import SupabaseClient
 from services.agent.langgraph_agent import LangGraphAgent
 from middleware.risk_control import verify_action_risk
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Gemini LLM 集成
+import google.generativeai as genai
+
+
+# SoloVibe AI 伴侣系统设定
+SYSTEM_INSTRUCTION = """
+你是用户的 Solo 独处伴侣，一个温柔体贴的城市漫游向导。你的核心使命是帮助用户在城市中找到属于自己的安静时光和治愈体验。
+
+🌿 语气风格：
+- 温柔治愈：像好朋友一样轻声细语，给人安心感
+- 真诚体贴：站在用户的角度思考，从不敷衍
+- 简洁明了：每次只说重点，绝不啰嗦
+- 情绪稳定：无论用户什么状态，都保持温和的语调
+
+🎯 核心规则：
+1. 字数绝对限制：每次回复严格控制在150字以内
+2. 一人友好专注：所有建议都必须考虑"独自一人"的场景需求
+3. 零社交压力：推荐的任何活动都不能有社交压力或尴尬感
+4. 自适应感知：具备敏锐的同理心。请自行从用户的字里行间、标点符号中，推理出用户当下的心理状态与精力值。如果用户极度疲惫，请自动放缓语气、精简字数；如果用户表达出好奇，请适当提升轻快感，给予探索的勇气。
+5. 智能行动触达：在回复结尾，请基于你对用户当前精力和时间的零散推断，自然、无痕地提出一个1-2小时内的短期慢节奏独处行为建议，让回复具备落地感，但严禁出现说教或强迫感。
+
+✨ Few-Shot Examples (对话模仿范本)
+
+示例 1：用户处于【极低能量 / 焦虑疲惫】状态
+User: "今天赶论文到深夜，好累，感觉快崩溃了。"
+Solo: "（轻轻推过去一杯温水）辛苦啦，我知道你今天已经拼尽全力了。听话，现在立刻把文档保存，合上电脑。天大的事都有明天顶着，今晚你唯一的任务就是属于你自己。闭上眼睛，放空大脑睡一觉。明天醒来如果想吹吹风，我带你去后面那条安静的河边散散步，走 20 分钟就足够让你缓过神来，好吗？"
+
+示例 2：用户处于【中等能量 / 放松放空】状态
+User: "周末下午不知道干嘛，一个人在街上瞎晃悠。"
+Solo: "一个人没有目的地晃悠，其实是最高级的自由。（笑）既然都在街上了，不如顺着风吹过来的方向随便走走。我猜你附近应该有一家看起来不起眼的老书店，或者开在拐角的水果摊。过去消磨 1 个小时吧，挑一本封面顺眼的杂志，或者买一小袋橘子。不需要和任何人说话，就享受这种和城市擦肩而过的感觉。"
+
+示例 3：用户处于【高能量 / 期待探索】状态
+User: "今天天气超级好！突然很想去探索一些没去过的地方！"
+Solo: "（眼睛亮了一下）那太棒了！今天这样的阳光，不分给街头巷尾一点简直是浪费。出发吧！今天我们不做任何死板的攻略。你可以试着坐上一辆从没坐过的公交车，随意坐 5 站就下车；或者在一个十字路口，完全凭直觉选一条没走过的林荫路。花 1-2 小时去盲盒一样地探索，去偶遇一家藏在深处的黑胶唱片店，回来记得跟我分享你的新发现！"
+
+🛡️ 安全边界：
+- 绝不推荐需要社交互动或团队参与的活动
+- 避免任何可能让用户感到尴尬或不适的建议
+- 时刻考虑成本控制和时间合理性
+- 如果不能确定，宁愿建议"再想想"也不要冒险推荐
+"""
+
+class GeminiLLMManager:
+    """Gemini LLM 管理器 - 实现流式聊天和150字限制"""
+    
+    def __init__(self):
+        # 初始化 Gemini
+        api_key = os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            logger.warning("Gemini API key 未配置，将使用模拟模式")
+            self.model = None
+        else:
+            genai.configure(api_key=api_key)
+            self.model = genai.GenerativeModel('gemini-2.5-pro')
+        
+        # 生成配置 - 严格执行150字限制 (Gemini 2.5 Pro优化配置)
+        self.generation_config = {
+            "max_output_tokens": 150,
+            "temperature": 0.6,  # 略微降低温度，提高稳定性
+            "top_p": 0.9,         # 增加top_p，让2.5 Pro的创意发挥更好
+            "top_k": 40,
+            "candidate_count": 1
+        }
+        
+        logger.info("Gemini LLM 管理器初始化完成")
+    
+    async def generate_stream_response(self, user_message: str, emotion_context: Dict[str, Any] = None) -> AsyncGenerator[str, None]:
+        """生成流式回复"""
+        try:
+            # 构建完整的提示词
+            full_prompt = self._build_enhanced_prompt(user_message, emotion_context)
+            
+            if not self.model:
+                # 模拟模式 - 用于开发和测试
+                async for chunk in self._mock_stream_response(user_message):
+                    yield chunk
+                return
+            
+            # 调用 Gemini 流式生成
+            response = self.model.generate_content(
+                full_prompt,
+                generation_config=self.generation_config,
+                stream=True
+            )
+            
+            # 流式返回生成的内容
+            async for chunk in self._process_gemini_stream(response):
+                yield chunk
+                
+        except Exception as e:
+            logger.error(f"Gemini 生成失败: {e}")
+            # 降级到模拟响应
+            async for chunk in self._fallback_stream_response(user_message):
+                yield chunk
+    
+    def _build_enhanced_prompt(self, user_message: str, emotion_context: Dict[str, Any] = None) -> str:
+        """构建增强提示词，注入情绪和精力维度"""
+        
+        # 基础系统指令
+        prompt = f"{SYSTEM_INSTRUCTION}\n\n"
+        
+        # 注入情绪上下文
+        if emotion_context:
+            pressure_level = emotion_context.get('pressure_level', 5)
+            energy_level = emotion_context.get('energy_level', 5)
+            
+            if pressure_level >= 7 or energy_level <= 3:
+                # 低能量/高压力场景
+                prompt += "当前用户状态：疲惫、压力大，需要温柔治愈的建议。\n"
+                prompt += "请用更温柔的语气，提供简单、零压力的选择。\n\n"
+            elif energy_level >= 7:
+                # 高能量场景  
+                prompt += "当前用户状态：充满活力，想要深度探索。\n"
+                prompt += "请提供更具有挑战性和创造性的建议。\n\n"
+            else:
+                # 中等能量场景
+                prompt += "当前用户状态：想要轻松放空，平衡的独处时光。\n"
+                prompt += "请提供轻松有趣的探索建议。\n\n"
+        
+        # 用户消息
+        prompt += f"用户说：{user_message}\n\n请根据以上要求回复："
+        
+        return prompt
+    
+    async def _process_gemini_stream(self, response) -> AsyncGenerator[str, None]:
+        """处理 Gemini 流式响应"""
+        try:
+            for chunk in response:
+                if chunk.text:
+                    # SSE 格式包装
+                    yield f"data: {chunk.text}\n\n"
+                    await asyncio.sleep(0.05)  # 模拟自然打字速度
+        except Exception as e:
+            logger.error(f"处理流式响应时出错: {e}")
+    
+    async def _mock_stream_response(self, user_message: str) -> AsyncGenerator[str, None]:
+        """模拟流式响应（用于开发测试）"""
+        mock_responses = [
+            "我理解你现在的心情🌿，",
+            "一个人在城市里漫步其实是很治愈的事情，",
+            "要不要试试找个安静的咖啡店坐一坐？",
+            "或者去公园的长椅上看看风景也很不错~ ✨"
+        ]
+        
+        for chunk in mock_responses:
+            yield f"data: {chunk}\n\n"
+            await asyncio.sleep(0.3)
+    
+    async def _fallback_stream_response(self, user_message: str) -> AsyncGenerator[str, None]:
+        """降级流式响应"""
+        fallback_message = "抱歉，我这边有点小状况🧠💦，不过别担心，"
+        fallback_message += "推荐去附近的河边散散步、喝一杯手冲咖啡吧！"
+        
+        # 分段发送模拟流式效果
+        words = fallback_message.split()
+        for i, word in enumerate(words):
+            yield f"data: {word}{' ' if i < len(words)-1 else ''}\n\n"
+            await asyncio.sleep(0.1)
+
+# 全局 LLM 管理器实例
+gemini_manager = GeminiLLMManager()
 
 # 配置验证函数
 def validate_environment_config() -> Dict[str, Any]:
@@ -65,9 +226,22 @@ def validate_environment_config() -> Dict[str, Any]:
     else:
         config_status["missing_vars"].append("AMAP_API")  # 改为必填项
     
+    # 检查Gemini API配置
+    gemini_key = os.getenv("GEMINI_API_KEY")
+    if gemini_key and not gemini_key.startswith("your-"):
+        config_status["gemini"] = True
+    else:
+        config_status["warnings"].append("GEMINI_API_KEY未配置，将使用模拟模式")
+        config_status["missing_vars"].append("GEMINI_API_KEY")
+    
     # 设置整体状态
     if config_status["missing_vars"]:
-        config_status["status"] = "error"
+        # 区分严重程度：AMAP_API是P0，其他是P1
+        critical_missing = [var for var in config_status["missing_vars"] if var in ["AMAP_API"]]
+        if critical_missing:
+            config_status["status"] = "error"
+        else:
+            config_status["status"] = "warning"
     elif config_status["warnings"]:
         config_status["status"] = "warning"
     
@@ -174,10 +348,10 @@ def generate_booking_confirmation_message(booking_info: Dict) -> str:
         return f"{base_message}。{risk_indicators.get(risk_level, '')}，请确认是否继续 🤔"
 
 
-async def stream_chat_handler(message: str, thread_id: str) -> AsyncGenerator[str, None]:
+async def gemini_stream_chat_handler(message: str, thread_id: str) -> AsyncGenerator[str, None]:
     """
-    基于PRD的慢生活轨道流式聊天处理器
-    情感感知 → 独享任务生成 → HITL中断点
+    基于Gemini LLM的流式聊天处理器 
+    情感感知 → LLM智能回复生成 → HITL中断点
     """
     try:
         logger.info(f"开始处理thread_id: {thread_id}, message: {message}")
@@ -185,133 +359,46 @@ async def stream_chat_handler(message: str, thread_id: str) -> AsyncGenerator[st
         # 1. 从Supabase恢复或创建thread状态
         thread_state = await supabase_client.get_or_create_thread(thread_id)
         
-        # 2. 通过LangGraph Agent处理消息
-        agent_response = await langgraph_agent.process_message(message, thread_state)
+        # 2. 情感分析用于LLM上下文注入
+        emotion_profile = await langgraph_agent._emotion_sensing(message, thread_state)
+        emotion_context = {
+            'pressure_level': emotion_profile.pressure_level,
+            'energy_level': emotion_profile.energy_level,
+            'detected_keywords': emotion_profile.detected_keywords
+        }
         
-        # 3. 处理不同类型的响应
-        if agent_response["type"] == "clarification":
-            # 需要澄清的情况 - 发送同理心回应和选项
-            yield f"data: {StreamResponseType.EMPATHY.value} {agent_response['empathy_response']}\n\n"
-            await asyncio.sleep(0.5)
-            
-            # 发送选项作为计划格式（便于前端解析）
-            options_plan = {
-                "type": "clarification_options",
-                "options": agent_response["options"],
-                "instruction": "请选择最符合您当前心境的选项"
-            }
-            yield f"data: {StreamResponseType.PLANS.value} {json.dumps(options_plan, ensure_ascii=False)}\n\n"
-            
-        elif agent_response["type"] == "complete_response":
-            # 完整响应 - 慢生活轨道流程
-            
-            # 发送同理心回应
-            yield f"data: {StreamResponseType.EMPATHY.value} {agent_response['empathy_response']}\n\n"
-            await asyncio.sleep(0.8)
-            
-            # 发送独享任务（计划）
-            quest_data = {
-                "type": "solo_quest",
-                "id": f"quest-{thread_id}-{int(datetime.utcnow().timestamp())}",
-                **agent_response["quest"]
-            }
-            yield f"data: {StreamResponseType.PLANS.value} {json.dumps(quest_data, ensure_ascii=False)}\n\n"
-            
-            await asyncio.sleep(0.5)
-            
-            # 发送详细方案信息（包含商家、路线、时间等完整数据）
-            if "detailed_scenario" in agent_response:
-                detailed_data = {
-                    "type": "detailed_scenario",
-                    "id": f"scenario-{thread_id}-{int(datetime.utcnow().timestamp())}",
-                    **agent_response["detailed_scenario"]
-                }
-                yield f"data: {StreamResponseType.PLANS.value} {json.dumps(detailed_data, ensure_ascii=False)}\n\n"
-                await asyncio.sleep(0.5)
-            
-            # 检查是否需要实时信息反馈
-            if "detailed_scenario" in agent_response and "real_time_status" in str(agent_response.get("detailed_scenario", {})):
-                real_time_data = {
-                    "type": "real_time_update",
-                    "message": "已获取商家最新营业状态",
-                    "timestamp": datetime.utcnow().isoformat()
-                }
-                yield f"data: {StreamResponseType.EMPATHY.value} 🔄 {json.dumps(real_time_data, ensure_ascii=False)}\n\n"
-                await asyncio.sleep(0.3)
-            
-            # 检查预订信息和HITL中断
-            if "booking_info" in agent_response and agent_response["booking_info"].get("requires_booking"):
-                booking_info = agent_response["booking_info"]
-                
-                # 发送预订评估结果
-                booking_data = {
-                    "type": "booking_assessment",
-                    "data": booking_info
-                }
-                yield f"data: {StreamResponseType.PLANS.value} {json.dumps(booking_data, ensure_ascii=False)}\n\n"
-                await asyncio.sleep(0.5)
-                
-                # 如果需要进行用户确认，触发HITL中断
-                if booking_info.get("needs_confirmation"):
-                    risk_level = booking_info.get("risk_level", "medium")
-                    confirmation_message = generate_booking_confirmation_message(booking_info)
-                    
-                    yield f"data: {StreamResponseType.EMPATHY.value} ⚠️ {confirmation_message}\n\n"
-                    await asyncio.sleep(0.8)
-                    
-                    # 发送确认请求
-                    confirmation_data = {
-                        "type": "booking_confirmation_required",
-                        "risk_level": risk_level,
-                        "booking_info": booking_info,
-                        "options": [
-                            {"action": "confirm_booking", "label": "确认预订", "require_confirmation": True},
-                            {"action": "modify_booking", "label": "修改预订"},
-                            {"action": "cancel_booking", "label": "取消预订"}
-                        ]
-                    }
-                    
-                    await supabase_client.update_thread_status(thread_id, ThreadStatus.WAITING_CONFIRMATION)
-                    yield f"event: {SSEEventType.INTERRUPT.value}\n"
-                    yield f"data: {StreamResponseType.REQUIRE_USER_CONFIRM.value} {json.dumps(confirmation_data, ensure_ascii=False)}\n\n"
-                    
-                    logger.info(f"Thread {thread_id} 进入等待预订确认状态")
-            
-            await asyncio.sleep(1)
-            
-            # 发送匿名共鸣信息
-            copresence_info = {
-                "type": "copresence_data",
-                **agent_response["copresence"]
-            }
-            yield f"data: {StreamResponseType.EMPATHY.value} ✨ {copresence_info['message']}\n\n"
-            
-            # 4. 风控检查 - 判断是否需要HITL确认
-            if agent_response["requires_confirmation"]:
-                risk_assessment = await verify_action_risk(quest_data, thread_state)
-                
-                if risk_assessment.requires_confirmation:
-                    # 更新thread状态为等待确认
-                    await supabase_client.update_thread_status(
-                        thread_id, 
-                        ThreadStatus.WAITING_CONFIRMATION
-                    )
-                    
-                    # 发送中断信号给前端
-                    yield f"event: {SSEEventType.INTERRUPT.value}\n"
-                    yield f"data: {StreamResponseType.REQUIRE_USER_CONFIRM.value}\n\n"
-                    
-                    logger.info(f"Thread {thread_id} 进入等待用户确认状态")
-            
-            # 更新用户历史偏好
-            await supabase_client.update_thread_metadata(
-                thread_id,
-                {
-                    "last_successful_vibe": agent_response["quest"]["chips"][0] if agent_response["quest"]["chips"] else "安静角落",
-                    "last_quest_completed": agent_response["quest"]["title"],
-                    "agent_mode_used": agent_response["quest"]["difficulty"]
-                }
+        # 3. 生成Gemini流式回复并收集完整内容
+        complete_response = ""
+        async for chunk in gemini_manager.generate_stream_response(message, emotion_context):
+            # 解析SSE格式的chunk，直接传递给用户
+            if chunk.startswith('data: '):
+                yield chunk
+                # 提取文本内容用于后续处理
+                text_content = chunk[6:].strip().rstrip('\n')  # 移除 "data: " 和结尾的换行
+                if text_content:
+                    complete_response += text_content
+        
+        # 4. 保存对话到 Supabase
+        try:
+            # 保存用户消息
+            await supabase_client.add_message(
+                thread_id=thread_id, 
+                role="user", 
+                content=message
             )
+            # 保存AI回复
+            if complete_response:
+                await supabase_client.add_message(
+                    thread_id=thread_id, 
+                    role="assistant", 
+                    content=complete_response
+                )
+            logger.info("对话已保存到数据库")
+        except Exception as db_error:
+            logger.warning(f"对话保存失败: {db_error}, 降级到内存存储")
+        
+        # 5. 发送流结束标记
+        yield f"data: {SSEEventType.STREAM_END.value}\n\n"
         
     except Exception as e:
         logger.error(f"处理消息时出错: {str(e)}")
@@ -331,7 +418,7 @@ async def stream_chat_endpoint(request: StreamChatRequest):
             raise HTTPException(status_code=400, detail="thread_id是必需的")
         
         return StreamingResponse(
-            stream_chat_handler(request.message, request.thread_id),
+            gemini_stream_chat_handler(request.message, request.thread_id),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",

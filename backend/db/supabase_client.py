@@ -19,21 +19,84 @@ class SupabaseClient:
         self.supabase_key = os.getenv("SUPABASE_KEY")
         self.database_url = os.getenv("DATABASE_URL")
         
-        # 内存数据库作为模拟存储
+        # 真实 Supabase 数据库连接
+        self.supabase_client = None
+        self._is_connected_to_real_db = False
+        
+        # 内存数据库作为后备存储（当真实数据库不可用时）
         self._threads_db: Dict[str, Dict] = {}
         self._messages_db: List[Dict] = []
         self._checkpoints_db: List[Dict] = []
         
-        logger.info("SupabaseClient 初始化完成（模拟模式）")
+        # 尝试初始化真实数据库连接
+        self._init_real_supabase()
+        
+        if self._is_connected_to_real_db:
+            logger.info("SupabaseClient 初始化完成（真实数据库模式）")
+        else:
+            logger.info("SupabaseClient 初始化完成（后备内存模式）")
+    
+    def _init_real_supabase(self):
+        """初始化真实 Supabase 连接"""
+        try:
+            if self.supabase_url and self.supabase_key:
+                # 动态导入以避免依赖问题
+                import supabase
+                self.supabase_client = supabase.create_client(
+                    self.supabase_url, 
+                    self.supabase_key
+                )
+                self._is_connected_to_real_db = True
+                logger.info("成功连接到真实 Supabase 数据库")
+            else:
+                logger.warning("Supabase 配置缺失，使用内存模式")
+        except ImportError:
+            logger.warning("Supabase 库未安装，使用内存模式")
+        except Exception as e:
+            logger.error(f"连接 Supabase 失败: {e}，使用内存模式")
+    
+    def _get_timestamp(self) -> str:
+        """获取当前时间戳"""
+        return datetime.utcnow().isoformat()
     
     async def check_connection(self) -> bool:
-        """检查连接状态（模拟）"""
-        return True
+        """检查数据库连接状态"""
+        if self._is_connected_to_real_db and self.supabase_client:
+            try:
+                # 尝试一个简单的查询来验证连接
+                result = self.supabase_client.table('threads').select('count', count='exact').limit(1).execute()
+                return True
+            except Exception as e:
+                logger.error(f"Supabase 连接检查失败: {e}")
+                self._is_connected_to_real_db = False
+                return False
+        return True  # 内存模式始终可用
     
     async def get_thread(self, thread_id: str) -> Optional[ThreadState]:
-        """获取特定thread的状态"""
+        """获取特定thread的状态（优先从真实数据库获取）"""
+        try:
+            # 尝试从真实数据库获取
+            if self._is_connected_to_real_db and self.supabase_client:
+                result = self.supabase_client.table('threads').select('*').eq('thread_id', thread_id).execute()
+                if result.data:
+                    thread_data = result.data[0]
+                    logger.info(f"从真实数据库获取 thread {thread_id}")
+                    return ThreadState(
+                        thread_id=thread_data["thread_id"],
+                        status=ThreadStatus(thread_data["status"]),
+                        messages=thread_data.get("messages", []),
+                        metadata=thread_data.get("metadata", {}),
+                        created_at=thread_data.get("created_at"),
+                        updated_at=thread_data.get("updated_at")
+                    )
+        except Exception as e:
+            logger.error(f"从真实数据库获取 thread {thread_id} 失败: {e}")
+            self._is_connected_to_real_db = False
+        
+        # 回退到内存数据库
         if thread_id in self._threads_db:
             thread_data = self._threads_db[thread_id]
+            logger.info(f"从内存数据库获取 thread {thread_id}（回退）")
             return ThreadState(
                 thread_id=thread_data["thread_id"],
                 status=ThreadStatus(thread_data["status"]),
@@ -141,18 +204,31 @@ class SupabaseClient:
             return False
     
     async def save_checkpoint(self, checkpoint_data: CheckpointData) -> bool:
-        """保存LangGraph检查点"""
+        """保存LangGraph检查点到数据库（优先真实数据库）"""
         try:
             checkpoint_record = {
-                "id": f"checkpoint-{datetime.utcnow().timestamp()}",
                 "thread_id": checkpoint_data.thread_id,
                 "checkpoint_id": checkpoint_data.checkpoint_id,
-                "state": checkpoint_data.state,
+                "state": json.dumps(checkpoint_data.state),  # JSON序列化
                 "timestamp": checkpoint_data.timestamp
             }
             
-            self._checkpoints_db.append(checkpoint_record)
-            logger.info(f"检查点 {checkpoint_data.checkpoint_id} 已保存")
+            # 优先保存到真实数据库
+            if self._is_connected_to_real_db and self.supabase_client:
+                try:
+                    result = self.supabase_client.table('checkpoints').insert(checkpoint_record).execute()
+                    logger.info(f"检查点 {checkpoint_data.checkpoint_id} 已保存到真实数据库")
+                    return True
+                except Exception as e:
+                    logger.error(f"保存检查点到真实数据库失败: {e}")
+                    self._is_connected_to_real_db = False
+            
+            # 回退到内存数据库
+            if not self._is_connected_to_real_db:
+                checkpoint_record["id"] = f"checkpoint-{self._get_timestamp()}"
+                self._checkpoints_db.append(checkpoint_record)
+                logger.info(f"检查点 {checkpoint_data.checkpoint_id} 已保存到内存数据库（回退）")
+            
             return True
             
         except Exception as e:

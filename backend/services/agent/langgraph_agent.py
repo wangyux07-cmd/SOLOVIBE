@@ -58,6 +58,11 @@ class LangGraphAgent:
         self.web_search_tool = None  # 延迟初始化
         self.booking_safety_gate = BookingSafetyGate()
         self.booking_execution_tool = None  # 延迟初始化
+        
+        # 初始化 Supabase 客户端用于检查点持久化
+        from db.supabase_client import SupabaseClient
+        self.supabase_client = SupabaseClient()
+        
         logger.info("LangGraph Agent 初始化完成（慢生活轨道模式）")
     
     async def process_message(self, message: str, thread_state: ThreadState) -> Dict[str, Any]:
@@ -581,7 +586,7 @@ class LangGraphAgent:
     # 已更新为使用详细方案的安全检查方法
 
     async def _save_enhanced_checkpoint(self, thread_id: str, state_data: dict) -> bool:
-        """保存增强检查点"""
+        """保存增强检查点到 Supabase 数据库"""
         checkpoint_id = f"checkpoint-{datetime.utcnow().timestamp()}"
         
         checkpoint_data = CheckpointData(
@@ -591,14 +596,31 @@ class LangGraphAgent:
             timestamp=datetime.utcnow().isoformat()
         )
         
-        # 保存到内存
-        self.checkpoint_data[checkpoint_id] = checkpoint_data
-        
-        # 同时保存情感记忆
-        self.emotion_memory[thread_id] = state_data.get("emotion_profile")
-        
-        logger.info(f"增强检查点 {checkpoint_id} 已保存")
-        return True
+        try:
+            # 优先保存到 Supabase 数据库（持久化）
+            if self.supabase_client:
+                success = await self.supabase_client.save_checkpoint(checkpoint_data)
+                if success:
+                    logger.info(f"增强检查点 {checkpoint_id} 已保存到 Supabase 数据库")
+                else:
+                    logger.error(f"保存检查点 {checkpoint_id} 到 Supabase 失败，回退到内存")
+                    # 回退到内存存储
+                    self.checkpoint_data[checkpoint_id] = checkpoint_data
+            else:
+                logger.warning("Supabase 客户端未初始化，使用内存存储")
+                self.checkpoint_data[checkpoint_id] = checkpoint_data
+            
+            # 同时保存情感记忆
+            self.emotion_memory[thread_id] = state_data.get("emotion_profile")
+            
+            logger.info(f"增强检查点 {checkpoint_id} 保存完成")
+            return True
+            
+        except Exception as e:
+            logger.error(f"保存增强检查点 {checkpoint_id} 时出错: {e}")
+            # 异常时回退到内存
+            self.checkpoint_data[checkpoint_id] = checkpoint_data
+            return False
 
     def _detect_intent(self, message: str) -> str:
         """保持向后兼容的意图检测方法"""
@@ -716,7 +738,7 @@ class LangGraphAgent:
         return False
     
     async def _save_checkpoint(self, thread_id: str, state: Dict[str, Any]) -> bool:
-        """保存检查点状态"""
+        """保存检查点状态到 Supabase 数据库（向后兼容）"""
         checkpoint_id = f"checkpoint-{datetime.utcnow().timestamp()}"
         
         checkpoint_data = CheckpointData(
@@ -726,11 +748,26 @@ class LangGraphAgent:
             timestamp=datetime.utcnow().isoformat()
         )
         
-        # 保存到内存
-        self.checkpoint_data[checkpoint_id] = checkpoint_data
-        
-        logger.info(f"检查点 {checkpoint_id} 已保存")
-        return True
+        try:
+            # 优先保存到 Supabase 数据库
+            if self.supabase_client:
+                success = await self.supabase_client.save_checkpoint(checkpoint_data)
+                if success:
+                    logger.info(f"检查点 {checkpoint_id} 已保存到 Supabase 数据库")
+                    return True
+                else:
+                    logger.error(f"保存检查点 {checkpoint_id} 到 Supabase 失败")
+            
+            # 回退到内存存储
+            self.checkpoint_data[checkpoint_id] = checkpoint_data
+            logger.info(f"检查点 {checkpoint_id} 已保存到内存（回退）")
+            return True
+            
+        except Exception as e:
+            logger.error(f"保存检查点 {checkpoint_id} 时出错: {e}")
+            # 异常时回退到内存
+            self.checkpoint_data[checkpoint_id] = checkpoint_data
+            return False
     
     async def restore_from_checkpoint(self, checkpoint_id: str) -> Optional[Dict[str, Any]]:
         """从检查点恢复状态"""

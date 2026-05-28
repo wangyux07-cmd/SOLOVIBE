@@ -35,6 +35,77 @@ from services.data.wanderbook_bridge import WanderbookBridge, WanderbookEntrySta
 from services.security.antibot_orchestrator import AntiBotOrchestrator, BlockingType, MitigationStrategy
 from data_types import RiskLevel
 
+# 幂等性和并发控制
+import asyncio
+from typing import Set
+from contextlib import asynccontextmanager
+
+# 全局并发保护
+class ConcurrencyManager:
+    """并发管理器 - 实现幂等性和并发控制"""
+    
+    def __init__(self):
+        # 正在执行的预约ID集合
+        self._active_bookings: Set[str] = set()
+        # 预约锁字典（按商户名称和时间的组合）
+        self._booking_locks: Dict[str, asyncio.Lock] = {}
+        # 全局锁用于保护数据结构
+        self._global_lock = asyncio.Lock()
+        # 幂等性缓存（booking_key -> result）
+        self._idempotent_cache: Dict[str, Any] = {}
+        
+    async def acquire_booking_lock(self, merchant_name: str, booking_time: str) -> str:
+        """获取预约锁，返回锁键"""
+        lock_key = f"{merchant_name}_{booking_time}"
+        
+        async with self._global_lock:
+            if lock_key not in self._booking_locks:
+                self._booking_locks[lock_key] = asyncio.Lock()
+            
+            lock = self._booking_locks[lock_key]
+            
+        await lock.acquire()
+        return lock_key
+        
+    def release_booking_lock(self, lock_key: str):
+        """释放预约锁"""
+        if lock_key in self._booking_locks:
+            self._booking_locks[lock_key].release()
+            
+    async def check_and_mark_active(self, booking_id: str) -> bool:
+        """检查并标记预约为活跃状态，返回是否允许执行"""
+        async with self._global_lock:
+            if booking_id in self._active_bookings:
+                return False  # 已在执行中
+            self._active_bookings.add(booking_id)
+            return True
+            
+    async def mark_completed(self, booking_id: str):
+        """标记预约完成"""
+        async with self._global_lock:
+            self._active_bookings.discard(booking_id)
+            
+    async def check_idempotent(self, booking_key: str, max_age_hours: int = 24) -> Optional[Any]:
+        """检查幂等性缓存"""
+        async with self._global_lock:
+            if booking_key in self._idempotent_cache:
+                cached_result, timestamp = self._idempotent_cache[booking_key]
+                age_hours = (datetime.now() - timestamp).total_seconds() / 3600
+                if age_hours <= max_age_hours:
+                    return cached_result
+                else:
+                    # 过期缓存
+                    del self._idempotent_cache[booking_key]
+            return None
+            
+    async def cache_result(self, booking_key: str, result: Any):
+        """缓存结果用于幂等性保护"""
+        async with self._global_lock:
+            self._idempotent_cache[booking_key] = (result, datetime.now())
+
+# 全局并发管理器实例
+concurrency_manager = ConcurrencyManager()
+
 
 class AmapServiceType(Enum):
     """高德服务类型枚举"""
@@ -569,10 +640,44 @@ class PlaywrightBookingExecutionTool:
                             booking_request: Dict[str, Any],
                             feedback_callback: Callable[[ExecutionFeedback], None] = None) -> PlaywrightBookingResult:
         """
-        执行浏览器自动化预约
+        执行浏览器自动化预约（带幂等性和并发控制）
         """
         booking_id = f"playwright_{datetime.now().strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:8]}"
         start_time = datetime.now()
+        
+        try:
+            # 🔒 幂等性检查 - 防止重复执行
+            merchant_name = booking_request.get('merchant_name', '')
+            booking_time = booking_request.get('planned_time', '')
+            booking_key = f"{merchant_name}_{booking_time}"
+            
+            # 检查是否已有相同预约在执行或已完成
+            existing_result = await concurrency_manager.check_idempotent(booking_key)
+            if existing_result:
+                logger.info(f"发现重复预约请求，返回缓存结果: {booking_key}")
+                await self._send_feedback(
+                    feedback_callback, ExecutionStage.FINALIZING, BookingStatus.COMPLETED,
+                    "预约已存在，返回之前的结果", 100
+                )
+                return existing_result
+            
+            # 🔒 并发控制 - 检查是否已有相同预约正在执行
+            if not await concurrency_manager.check_and_mark_active(booking_id):
+                logger.warning(f"预约已在执行中，拒绝重复请求: {booking_id}")
+                await self._send_feedback(
+                    feedback_callback, ExecutionStage.FINALIZING, BookingStatus.FAILED,
+                    "预约已在处理中，请稍后再试", 100
+                )
+                return PlaywrightBookingResult(
+                    success=False,
+                    booking_id=booking_id,
+                    next_user_action="预约已在处理中，请稍后再试",
+                    retry_suggestions=["等待当前预约完成后再试"]
+                )
+            
+            # 🔒 获取商户级别的锁，防止同一商户的并发预约冲突
+            lock_key = await concurrency_manager.acquire_booking_lock(merchant_name, booking_time)
+            logger.info(f"获取到商户预约锁: {lock_key}")
         
         try:
             # 阶段1: 初始化
@@ -711,7 +816,7 @@ class PlaywrightBookingExecutionTool:
                 error_msg, 100, error=error_msg
             )
             
-            return PlaywrightBookingResult(
+            failed_result = PlaywrightBookingResult(
                 success=False,
                 booking_id=booking_id,
                 next_user_action="请重试或联系客服",
@@ -722,6 +827,28 @@ class PlaywrightBookingExecutionTool:
                     "稍后重试（可能是临时风控）"
                 ]
             )
+            
+            return failed_result
+            
+        finally:
+            # 🔒 清理并发控制状态
+            try:
+                # 释放商户锁
+                if 'lock_key' in locals():
+                    concurrency_manager.release_booking_lock(lock_key)
+                    logger.info(f"已释放商户预约锁: {lock_key}")
+                
+                # 标记预约完成
+                await concurrency_manager.mark_completed(booking_id)
+                logger.info(f"已标记预约完成: {booking_id}")
+                
+                # 缓存成功结果用于幂等性保护（仅在成功执行时）
+                if 'result' in locals() and hasattr(result, 'success') and result.success:
+                    await concurrency_manager.cache_result(booking_key, result)
+                    logger.info(f"已缓存成功结果用于幂等性保护: {booking_key}")
+                    
+            except Exception as e:
+                logger.error(f"清理并发控制状态时出错: {e}")
     
     async def resume_booking(self, snapshot_id: str, user_action: str = "confirm") -> PlaywrightBookingResult:
         """恢复被中断的预约"""
