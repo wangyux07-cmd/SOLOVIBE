@@ -33,7 +33,7 @@ from data_types import ThreadState, RiskAssessment
 from db.supabase_client import SupabaseClient
 from services.data.wanderbook_bridge import WanderbookBridge, WanderbookEntryStatus
 from services.security.antibot_orchestrator import AntiBotOrchestrator, BlockingType, MitigationStrategy
-from data_types import RiskLevel
+from services.tools.booking_safety_gate import RiskLevel
 
 # 幂等性和并发控制
 import asyncio
@@ -679,7 +679,6 @@ class PlaywrightBookingExecutionTool:
             lock_key = await concurrency_manager.acquire_booking_lock(merchant_name, booking_time)
             logger.info(f"获取到商户预约锁: {lock_key}")
         
-        try:
             # 阶段1: 初始化
             await self._send_feedback(
                 feedback_callback, ExecutionStage.INITIALIZING, BookingStatus.PROCESSING,

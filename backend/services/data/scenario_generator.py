@@ -12,8 +12,8 @@ from datetime import datetime, timedelta
 import hashlib
 
 # 导入高德地图相关的数据结构
-from ..tools.booking_execution_tool import (
-    AmapPoiResult, AmapRouteResult, AmapExecutionTool
+from services.tools.booking_execution_tool import (
+    AmapPoiResult, AmapRouteResult, PlaywrightBookingExecutionTool
 )
 from .merchant_database import (
     Merchant, MerchantType, COFFEE_SHOPS, 

@@ -10,8 +10,8 @@ from datetime import datetime
 import asyncio
 from enum import Enum
 
-from ...data_types import ThreadState
-from ...db.supabase_client import SupabaseClient
+from data_types import ThreadState
+from db.supabase_client import SupabaseClient
 
 
 logger = logging.getLogger(__name__)

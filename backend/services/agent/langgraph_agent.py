@@ -10,7 +10,7 @@ from data_types import ThreadState, CheckpointData
 from services.data.scenario_generator import EnhancedScenarioGenerator
 from services.tools.web_search_tool import WebSearchTool, SearchQuery, BusinessInfo
 from services.tools.booking_safety_gate import BookingSafetyGate, BookingRequest, BookingType, RiskAssessment
-from services.tools.booking_execution_tool import BookingExecutionTool, ExecutionFeedback, BookingResult
+from services.tools.booking_execution_tool import PlaywrightBookingExecutionTool, ExecutionFeedback, PlaywrightBookingResult
 
 logger = logging.getLogger(__name__)
 
