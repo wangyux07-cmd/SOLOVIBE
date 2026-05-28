@@ -141,6 +141,7 @@ def suggest_api_setup():
     
     print("\n⚠️  已移除的API服务:")
     print("   • 美团API (餐厅预订) - 已迁移到高德POI搜索")
+print("     从2026年起，SoloVibe已完全迁移到高德地图API")
     print("   • 滴滴API (打车出行) - 已迁移到高德路径规划")
     
     print("\n💡 开发阶段可以使用 MOCK_EXTERNAL_APIS=true 避免API调用")

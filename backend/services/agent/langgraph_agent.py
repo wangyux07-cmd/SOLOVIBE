@@ -470,7 +470,7 @@ class LangGraphAgent:
                 planned_time=datetime.now().isoformat(),  # 默认现在
                 estimated_duration=90,  # 默认90分钟
                 requires_external_api=True,
-                api_provider="meituan",  # 默认为美团
+                # api_provider="",  # 不再使用美团API
                 special_requirements=self._extract_special_requirements(user_message)
             )
             

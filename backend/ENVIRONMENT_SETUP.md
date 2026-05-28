@@ -75,7 +75,7 @@ SERPER_API_KEY=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 - ✅ 距离计算和可达性分析
 
 **❌ 不再支持**：
-- 美团API（餐厅预订）
+- ~~美团API（餐厅预订）~~ **已弃用，完全迁移到高德地图API**
 - 滴滴API（打车出行）
 - 所有地理空间服务已统一迁移到高德
 
@@ -185,7 +185,7 @@ PROMETHEUS_PORT=8001
 # === 生产API配置 ===
 # 确保使用生产环境的API密钥
 TAVILY_API_KEY=your-production-tavily-key
-MEITUAN_API_KEY=your-production-meituan-key
+# MEITUAN_API_KEY=your-production-meituan-key  # 已废弃，不再使用
 AMAP_API_KEY=your-production-gaode-key
 
 # === 安全限制 ===
@@ -258,7 +258,7 @@ python check_config.py
 - 每天50000次免费额度
 - 需要实名认证手机号
 
-### 美团API
+### ~~美团API~~ （**已弃用**）
 - 主要针对企业开发者
 - 个人开发者可使用Mock模式开发
 - 或者寻找合作伙伴获取企业资质

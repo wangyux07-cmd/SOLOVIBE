@@ -10,9 +10,11 @@ import logging
 from datetime import datetime, timedelta
 import random
 
-from playwright.async_api import Page, BrowserContext
+# from playwright.async_api import Page, BrowserContext  # 避免Hard dep
+from typing import Any
+from enum import Enum
 
-from ...data_types import RiskLevel
+from ..tools.booking_safety_gate import RiskLevel
 
 
 logger = logging.getLogger(__name__)

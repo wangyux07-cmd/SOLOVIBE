@@ -5,8 +5,14 @@
 """
 
 import asyncio
+import sys
+import os
+
+# 添加backend目录到路径
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+
 from backend.services.security.antibot_orchestrator import AntiBotOrchestrator, BlockingType, MitigationStrategy
-from backend.data_types import RiskLevel
+from backend.services.tools.booking_safety_gate import RiskLevel
 
 
 async def test_risk_assessment():
