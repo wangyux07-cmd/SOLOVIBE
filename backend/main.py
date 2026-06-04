@@ -98,8 +98,8 @@ class GeminiLLMManager:
                     yield chunk
                 return
             
-            # 调用 Gemini 流式生成
-            response = self.model.generate_content(
+            # 调用 Gemini 流式生成（确保你使用的是异步生成方法）
+            response = await self.model.generate_content_async( # 👈 确保这里用了 async 方法和 await
                 full_prompt,
                 generation_config=self.generation_config,
                 stream=True
@@ -145,13 +145,13 @@ class GeminiLLMManager:
         return prompt
     
     async def _process_gemini_stream(self, response) -> AsyncGenerator[str, None]:
-        """处理 Gemini 流式响应"""
+        """处理 Gemini 流式响应 - 修复同步阻塞导致的流式失效"""
         try:
-            for chunk in response:
+            # 🌟 核心修改：必须使用 async for，这样大模型每蹦出一个字，后端就能立刻捕获并转发
+            async for chunk in response: 
                 if chunk.text:
-                    # SSE 格式包装
+                    # SSE 格式包装（不用担心，刚才我们在 handler 内部写了逻辑，会自动剥离 data:）
                     yield f"data: {chunk.text}\n\n"
-                    await asyncio.sleep(0.05)  # 模拟自然打字速度
         except Exception as e:
             logger.error(f"处理流式响应时出错: {e}")
     
@@ -350,8 +350,8 @@ def generate_booking_confirmation_message(booking_info: Dict) -> str:
 
 async def gemini_stream_chat_handler(message: str, thread_id: str) -> AsyncGenerator[str, None]:
     """
-    基于Gemini LLM的流式聊天处理器 
-    情感感知 → LLM智能回复生成 → HITL中断点
+    基于Gemini LLM的纯净流式聊天处理器
+    情感感知 → 洗掉复杂格式 → 直接流出纯文本字块
     """
     try:
         logger.info(f"开始处理thread_id: {thread_id}, message: {message}")
@@ -367,44 +367,39 @@ async def gemini_stream_chat_handler(message: str, thread_id: str) -> AsyncGener
             'detected_keywords': emotion_profile.detected_keywords
         }
         
-        # 3. 生成Gemini流式回复并收集完整内容
+        # 3. 收集回复并直接向前端 yield 纯文本字符
         complete_response = ""
         async for chunk in gemini_manager.generate_stream_response(message, emotion_context):
-            # 解析SSE格式的chunk，直接传递给用户
+            # 剥离原先 gemini_manager 产生的 'data: ' 协议前缀
             if chunk.startswith('data: '):
-                yield chunk
-                # 提取文本内容用于后续处理
-                text_content = chunk[6:].strip().rstrip('\n')  # 移除 "data: " 和结尾的换行
+                text_content = chunk[6:].strip().rstrip('\n')
                 if text_content:
-                    complete_response += text_content
+                    # 过滤掉无意义的旧结束标记，只放行真正的文本碎片
+                    if "STREAM_END" not in text_content:
+                        complete_response += text_content
+                        yield text_content  # 🌟 核心改动：直接把干净的字吐给前端，不带任何格式包皮
         
-        # 4. 保存对话到 Supabase
+        # 4. 默默在后台将对话安全地保存到 Supabase 数据库中
         try:
-            # 保存用户消息
             await supabase_client.add_message(
                 thread_id=thread_id, 
                 role="user", 
                 content=message
             )
-            # 保存AI回复
             if complete_response:
                 await supabase_client.add_message(
                     thread_id=thread_id, 
                     role="assistant", 
                     content=complete_response
                 )
-            logger.info("对话已保存到数据库")
+            logger.info("对话已成功同步保存至 Supabase 数据库")
         except Exception as db_error:
-            logger.warning(f"对话保存失败: {db_error}, 降级到内存存储")
-        
-        # 5. 发送流结束标记
-        yield f"data: {SSEEventType.STREAM_END.value}\n\n"
-        
+            logger.warning(f"数据库保存失败: {db_error}，已自动激活降级方案")
+            
     except Exception as e:
-        logger.error(f"处理消息时出错: {str(e)}")
-        error_message = "抱歉，我的大脑稍微有点断网了 🧠💦。不过别担心，给你推荐去附近的河边散散步、喝一杯醇厚的手冲咖啡吧！"
-        yield f"event: {SSEEventType.ERROR.value}\n"
-        yield f"data: {StreamResponseType.EMPATHY.value} {error_message}\n\n"
+        logger.error(f"流式数据管道异常: {str(e)}")
+        error_message = "抱歉，我的大脑稍微有点断网了 🧠💦。不过别担心，给你推荐去附近的河边散散步、喝一杯手冲咖啡吧！"
+        yield error_message  # 发生错误时，也直接返回纯文本兜底
 
 
 @app.post("/api/v1/stream_chat", response_model=StreamChatResponse)
