@@ -439,21 +439,18 @@ async def deepseek_stream_chat_handler(message: str, thread_id: str) -> AsyncGen
         complete_response = ""
         logger.info("步骤3: 开始调用DeepSeek生成流式回复...")
         
-        import asyncio
         try:
-            async for chunk in asyncio.wait_for(
-                deepseek_manager.generate_stream_response(message, emotion_context),
-                timeout=10.0  # 10秒后停止等待
-            ):
+            async for chunk in deepseek_manager.generate_stream_response(message, emotion_context):
                 logger.info(f"收到DeepSeek chunk: {chunk[:50]}...")  # 只记录前50个字符
-            # 剥离原先 deepseek_manager 产生的 'data: ' 协议前缀
-            if chunk.startswith('data: '):
-                text_content = chunk[6:].strip().rstrip('\n')
-                if text_content:
-                    # 过滤掉无意义的旧结束标记，只放行真正的文本碎片
-                    if "STREAM_END" not in text_content:
-                        complete_response += text_content
-                        yield text_content  # 🌟 核心改动：直接把干净的字吐给前端，不带任何格式包皮
+                
+                # 剥离原先 deepseek_manager 产生的 'data: ' 协议前缀
+                if chunk.startswith('data: '):
+                    text_content = chunk[6:].strip().rstrip('\n')
+                    if text_content:
+                        # 过滤掉无意义的旧结束标记，只放行真正的文本碎片
+                        if "STREAM_END" not in text_content:
+                            complete_response += text_content
+                            yield text_content
         except asyncio.TimeoutError:
             logger.warning("DeepSeek 流式响应超时")
             yield "响应超时，请稍后再试"
