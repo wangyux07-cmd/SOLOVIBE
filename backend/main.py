@@ -2,13 +2,31 @@ import asyncio
 import json
 import logging
 import os
+
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+import uvicorn
+
+# 🔌 Load .env 环境变量
+from dotenv import load_dotenv
+dotenv_loaded = load_dotenv()
+
+# 检查是否读到了 KEY
+deepseek_key = os.getenv('DEEPSEEK_API_KEY')
+if not deepseek_key:
+  logger.warning("DeepSeek API key未配置，将使用模拟模式")
+tavily_key = os.getenv('TAVILY_API_KEY')
+if not tavily_key:
+  logger.warning("Tavily API key未配置")
+amap_key = os.getenv('AMAP_API_KEY')
+if not amap_key:
+  logger.warning("AMAP_API_KEY未配置，将使用模拟数据")
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 from datetime import datetime
 from typing import AsyncGenerator, Dict, Any
-
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 import uvicorn
 
@@ -288,7 +306,9 @@ def validate_environment_config() -> Dict[str, Any]:
 app = FastAPI(
     title="SoloVibe Backend API",
     description="AI-powered solo experience planning with LangGraph and Supabase",
-    version="0.1.0"
+    version="0.1.0",
+    # 重要：允许来自前端的所有跨域访问
+    # 不指定host，host由uvicorn控制
 )
 
 # Configure CORS
@@ -303,6 +323,12 @@ app.add_middleware(
 # Initialize clients
 supabase_client = SupabaseClient()
 langgraph_agent = LangGraphAgent()
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    print(f"DEBUG: 收到来自 {request.client.host} 的请求，路径: {request.url.path}")
+    response = await call_next(request)
+    return response
 
 # API端点定义
 @app.get("/")
@@ -395,10 +421,14 @@ async def deepseek_stream_chat_handler(message: str, thread_id: str) -> AsyncGen
         logger.info(f"开始处理thread_id: {thread_id}, message: {message}")
         
         # 1. 从Supabase恢复或创建thread状态
+        logger.info("步骤1: 从Supabase恢复或创建thread状态...")
         thread_state = await supabase_client.get_or_create_thread(thread_id)
+        logger.info("步骤1完成: 获取到thread状态")
         
         # 2. 情感分析用于LLM上下文注入
+        logger.info("步骤2: 开始调用LangGraph情感分析...")
         emotion_profile = await langgraph_agent._emotion_sensing(message, thread_state)
+        logger.info("步骤2完成: 情感分析结果")
         emotion_context = {
             'pressure_level': emotion_profile.pressure_level,
             'energy_level': emotion_profile.energy_level,
@@ -407,7 +437,15 @@ async def deepseek_stream_chat_handler(message: str, thread_id: str) -> AsyncGen
         
         # 3. 收集回复并直接向前端 yield 纯文本字符
         complete_response = ""
-        async for chunk in deepseek_manager.generate_stream_response(message, emotion_context):
+        logger.info("步骤3: 开始调用DeepSeek生成流式回复...")
+        
+        import asyncio
+        try:
+            async for chunk in asyncio.wait_for(
+                deepseek_manager.generate_stream_response(message, emotion_context),
+                timeout=10.0  # 10秒后停止等待
+            ):
+                logger.info(f"收到DeepSeek chunk: {chunk[:50]}...")  # 只记录前50个字符
             # 剥离原先 deepseek_manager 产生的 'data: ' 协议前缀
             if chunk.startswith('data: '):
                 text_content = chunk[6:].strip().rstrip('\n')
@@ -416,6 +454,12 @@ async def deepseek_stream_chat_handler(message: str, thread_id: str) -> AsyncGen
                     if "STREAM_END" not in text_content:
                         complete_response += text_content
                         yield text_content  # 🌟 核心改动：直接把干净的字吐给前端，不带任何格式包皮
+        except asyncio.TimeoutError:
+            logger.warning("DeepSeek 流式响应超时")
+            yield "响应超时，请稍后再试"
+        except Exception as e:
+            logger.error(f"DeepSeek 流式响应错误: {str(e)}")
+            yield "AI 服务暂时不可用，请稍后再试"
         
         # 4. 默默在后台将对话安全地保存到 Supabase 数据库中
         try:
@@ -521,6 +565,7 @@ async def health_check():
 
 
 @app.post("/api/chat")
+###
 async def chat_endpoint(request: dict):
     """
     处理多轮聊天请求
@@ -529,48 +574,61 @@ async def chat_endpoint(request: dict):
         logger.info(f"收到聊天请求: {request}")
 
         messages = request.get("messages", [])
-        if not messages or not isinstance(messages, list):
+        if not messages or not isinstance(messages, list) or len(messages) == 0:
             logger.warning("消息数组为空或格式错误")
             raise HTTPException(status_code=400, detail="messages 是必需的且必须是数组")
 
-        # 组装格式化的消息列表
-        valid_roles = ["system", "user", "assistant", "tool", "latest_reminder"]
-        formatted_messages = []
+        # 提取最新的用户消息
+        latest_message = messages[-1]
+        if latest_message.get("role") != "user":
+            # 找最后一个用户消息
+            latest_user_msg = None
+            for msg in reversed(messages):
+                if msg.get("role") == "user":
+                    latest_user_msg = msg
+                    break
+            if not latest_user_msg:
+                latest_user_msg = latest_message  # fallback
+        else:
+            latest_user_msg = latest_message
 
-        # 添加系统指令
-        formatted_messages.append({
-            "role": "system",
-            "content": "你是 Solo，一个城市漫步伴侣。语气温柔治愈，回复限制在150字内。"
-        })
+        user_message = latest_user_msg.get("content", "")
+        if not user_message:
+            raise HTTPException(status_code=400, detail="用户消息内容不能为空")
 
-        # 转换历史消息
-        for i, msg in enumerate(messages):
-            role = msg.get("role", "user")
-            if role == "model":
-                role = "assistant"
-            elif role not in valid_roles:
-                role = "user"
-            formatted_messages.append({
-                "role": role,
-                "content": str(msg.get("content", ""))
-            })
+        # 生成 thread_id
+        import uuid
+        thread_id = latest_user_msg.get("id", str(uuid.uuid4()))
 
-        logger.info(f"发送消息给 DeepSeek: {formatted_messages}")
+        logger.info(f"处理用户消息: {user_message}, thread_id: {thread_id}")
+        logger.info("正在初始化流式处理handler...")
 
-        # 调用 DeepSeek
-        manager = deepseek_manager
-        if not manager:
-            raise HTTPException(status_code=500, detail="LLM 客户端未初始化")
-
-        # 使用管理器
-        user_message = messages[-1].get("content", "") if messages else ""
-        complete_response = ""
-        async for chunk in manager.generate_stream_response(user_message):
-            if chunk.startswith('data: '):
-                text_content = chunk[6:].strip().rstrip('\n')
-                if text_content:
-                    complete_response += text_content
-
+        # 使用现有的流式处理 handler（它内置情绪分析和POI搜索）
+        try:
+            # 收集完整响应 - 但添加超时限制
+            import asyncio
+            complete_response = ""
+            
+            # 使用异步任务来处理流式响应
+            async def collect_stream():
+                chunks = []
+                async for chunk in deepseek_stream_chat_handler(user_message, thread_id):
+                    chunks.append(chunk)
+                    # 累计到一定长度就停止，避免无限等待
+                    if len(''.join(chunks)) > 2000:  # 约2000字符限制
+                        break
+                return ''.join(chunks)
+            
+            # 设置15秒超时来收集响应
+            complete_response = await asyncio.wait_for(collect_stream(), timeout=15.0)
+            
+        except asyncio.TimeoutError:
+            logger.warning(f"流式处理超时 - thread_id: {thread_id}")
+            complete_response = "处理超时，请稍后再试"
+        except Exception as e:
+            logger.error(f"流式处理错误: {e}")
+            complete_response = "抱歉，处理消息时遇到问题"
+        
         if not complete_response:
             complete_response = "抱歉，我无法生成回复。"
 
@@ -673,6 +731,6 @@ if __name__ == "__main__":
         "main:app",
         host="0.0.0.0",
         port=8000,
-        reload=True,
+        reload=False,  # 禁用reload防止multiprocessing问题
         log_level="info"
     )
