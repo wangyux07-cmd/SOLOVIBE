@@ -7,19 +7,19 @@ pydantic==2.4.2
 # 数据库和状态管理
 asyncpg==0.29.0
 supabase==2.2.0
-psycopg2-binary==2.9.9
+# psycopg2-binary==2.9.9  # Windows安装失败，跳过
 
 # AI和对话管理
 langgraph==0.0.30
 langchain==0.1.0
 langchain-openai==0.0.2
-# Google Gemini API (支持Gemini 2.5 Pro)
-google-generativeai>=0.7.0
+# DeepSeek API (兼容OpenAI SDK格式)
+openai>=1.11.0
 
 # HTTP和网络请求
 python-multipart==0.0.6
 requests==2.31.0
-httpx==0.25.2
+httpx==0.24.1  # 兼容supabase 2.2.0
 aiohttp==3.9.1
 
 # Web搜索API客户端

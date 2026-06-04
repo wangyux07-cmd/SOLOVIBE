@@ -20,8 +20,8 @@ from db.supabase_client import SupabaseClient
 from services.agent.langgraph_agent import LangGraphAgent
 from middleware.risk_control import verify_action_risk
 
-# Gemini LLM 集成
-import google.generativeai as genai
+# DeepSeek LLM 集成
+import openai
 
 
 # SoloVibe AI 伴侣系统设定
@@ -62,29 +62,29 @@ Solo: "（眼睛亮了一下）那太棒了！今天这样的阳光，不分给�
 - 如果不能确定，宁愿建议"再想想"也不要冒险推荐
 """
 
-class GeminiLLMManager:
-    """Gemini LLM 管理器 - 实现流式聊天和150字限制"""
+class DeepSeekLLMManager:
+    """DeepSeek LLM 管理器 - 实现流式聊天和150字限制"""
     
     def __init__(self):
-        # 初始化 Gemini
-        api_key = os.getenv("GEMINI_API_KEY")
+        # 初始化 DeepSeek
+        api_key = os.getenv("DEEPSEEK_API_KEY")
         if not api_key:
-            logger.warning("Gemini API key 未配置，将使用模拟模式")
-            self.model = None
+            logger.warning("DeepSeek API key 未配置，将使用模拟模式")
+            self.client = None
         else:
-            genai.configure(api_key=api_key)
-            self.model = genai.GenerativeModel('gemini-2.5-pro')
+            self.client = openai.OpenAI(
+                api_key=api_key,
+                base_url="https://api.deepseek.com"
+            )
         
-        # 生成配置 - 严格执行150字限制 (Gemini 2.5 Pro优化配置)
+        # 生成配置 - 严格执行150字限制 (DeepSeek Chat优化配置)
         self.generation_config = {
-            "max_output_tokens": 150,
+            "max_tokens": 150,
             "temperature": 0.6,  # 略微降低温度，提高稳定性
-            "top_p": 0.9,         # 增加top_p，让2.5 Pro的创意发挥更好
-            "top_k": 40,
-            "candidate_count": 1
+            "top_p": 0.9,         # 增加top_p，让创意发挥更好
         }
         
-        logger.info("Gemini LLM 管理器初始化完成")
+        logger.info("DeepSeek LLM 管理器初始化完成")
     
     async def generate_stream_response(self, user_message: str, emotion_context: Dict[str, Any] = None) -> AsyncGenerator[str, None]:
         """生成流式回复"""
@@ -92,25 +92,58 @@ class GeminiLLMManager:
             # 构建完整的提示词
             full_prompt = self._build_enhanced_prompt(user_message, emotion_context)
             
-            if not self.model:
+            if not self.client:
                 # 模拟模式 - 用于开发和测试
                 async for chunk in self._mock_stream_response(user_message):
                     yield chunk
                 return
             
-            # 调用 Gemini 流式生成（确保你使用的是异步生成方法）
-            response = await self.model.generate_content_async( # 👈 确保这里用了 async 方法和 await
-                full_prompt,
-                generation_config=self.generation_config,
+            # 构建 messages 格式
+            messages = []
+            
+            # 系统指令作为 system message
+            messages.append({"role": "system", "content": SYSTEM_INSTRUCTION})
+            
+            # 注入情绪上下文
+            if emotion_context:
+                pressure_level = emotion_context.get('pressure_level', 5)
+                energy_level = emotion_context.get('energy_level', 5)
+                
+                if pressure_level >= 7 or energy_level <= 3:
+                    # 低能量/高压力场景
+                    messages.append({
+                        "role": "system", 
+                        "content": "当前用户状态：疲惫、压力大，需要温柔治愈的建议。请用更温柔的语气，提供简单、零压力的选择。"
+                    })
+                elif energy_level >= 7:
+                    # 高能量场景
+                    messages.append({
+                        "role": "system",
+                        "content": "当前用户状态：充满活力，想要深度探索。请提供更具有挑战性和创造性的建议。"
+                    })
+                else:
+                    messages.append({
+                        "role": "system",
+                        "content": "当前用户状态：正常平静，请给出平衡的建议。"
+                    })
+            
+            # 添加用户消息
+            messages.append({"role": "user", "content": user_message})
+            
+            # 调用 DeepSeek 流式生成
+            response_stream = await self.client.chat.completions.create(
+                model="deepseek-chat",
+                messages=messages,
+                **self.generation_config,
                 stream=True
             )
             
             # 流式返回生成的内容
-            async for chunk in self._process_gemini_stream(response):
+            async for chunk in self._process_deepseek_stream(response_stream):
                 yield chunk
                 
         except Exception as e:
-            logger.error(f"Gemini 生成失败: {e}")
+            logger.error(f"DeepSeek 生成失败: {e}")
             # 降级到模拟响应
             async for chunk in self._fallback_stream_response(user_message):
                 yield chunk
@@ -144,14 +177,19 @@ class GeminiLLMManager:
         
         return prompt
     
-    async def _process_gemini_stream(self, response) -> AsyncGenerator[str, None]:
-        """处理 Gemini 流式响应 - 修复同步阻塞导致的流式失效"""
+    async def _process_deepseek_stream(self, response_stream) -> AsyncGenerator[str, None]:
+        """处理 DeepSeek 流式响应 - 实时转发chunk"""
         try:
-            # 🌟 核心修改：必须使用 async for，这样大模型每蹦出一个字，后端就能立刻捕获并转发
-            async for chunk in response: 
-                if chunk.text:
-                    # SSE 格式包装（不用担心，刚才我们在 handler 内部写了逻辑，会自动剥离 data:）
-                    yield f"data: {chunk.text}\n\n"
+            # DeepSeek使用同步迭代器（注意！），但我们在内部用await asyncio.sleep保证非阻塞
+            for chunk in response_stream:
+                if chunk.choices and chunk.choices[0].delta.content:
+                    content = chunk.choices[0].delta.content
+                    # SSE 格式包装
+                    yield f"data: {content}\n\n"
+                
+                # 🚨⚠️关键！确保流过程非阻塞，让上层能实时收到每个字符
+                await asyncio.sleep(0.001)
+                
         except Exception as e:
             logger.error(f"处理流式响应时出错: {e}")
     
@@ -180,7 +218,7 @@ class GeminiLLMManager:
             await asyncio.sleep(0.1)
 
 # 全局 LLM 管理器实例
-gemini_manager = GeminiLLMManager()
+deepseek_manager = DeepSeekLLMManager()
 
 # 配置验证函数
 def validate_environment_config() -> Dict[str, Any]:
@@ -226,13 +264,13 @@ def validate_environment_config() -> Dict[str, Any]:
     else:
         config_status["missing_vars"].append("AMAP_API")  # 改为必填项
     
-    # 检查Gemini API配置
-    gemini_key = os.getenv("GEMINI_API_KEY")
-    if gemini_key and not gemini_key.startswith("your-"):
-        config_status["gemini"] = True
-    else:
-        config_status["warnings"].append("GEMINI_API_KEY未配置，将使用模拟模式")
-        config_status["missing_vars"].append("GEMINI_API_KEY")
+        # 检查DeepSeek API配置
+        deepseek_key = os.getenv("DEEPSEEK_API_KEY")
+        if deepseek_key and not deepseek_key.startswith("sk-你的"):
+            config_status["deepseek"] = True
+        else:
+            config_status["warnings"].append("DEEPSEEK_API_KEY未配置，将使用模拟模式")
+            config_status["missing_vars"].append("DEEPSEEK_API_KEY")
     
     # 设置整体状态
     if config_status["missing_vars"]:
@@ -348,9 +386,9 @@ def generate_booking_confirmation_message(booking_info: Dict) -> str:
         return f"{base_message}。{risk_indicators.get(risk_level, '')}，请确认是否继续 🤔"
 
 
-async def gemini_stream_chat_handler(message: str, thread_id: str) -> AsyncGenerator[str, None]:
+async def deepseek_stream_chat_handler(message: str, thread_id: str) -> AsyncGenerator[str, None]:
     """
-    基于Gemini LLM的纯净流式聊天处理器
+    基于DeepSeek LLM的纯净流式聊天处理器
     情感感知 → 洗掉复杂格式 → 直接流出纯文本字块
     """
     try:
@@ -369,8 +407,8 @@ async def gemini_stream_chat_handler(message: str, thread_id: str) -> AsyncGener
         
         # 3. 收集回复并直接向前端 yield 纯文本字符
         complete_response = ""
-        async for chunk in gemini_manager.generate_stream_response(message, emotion_context):
-            # 剥离原先 gemini_manager 产生的 'data: ' 协议前缀
+        async for chunk in deepseek_manager.generate_stream_response(message, emotion_context):
+            # 剥离原先 deepseek_manager 产生的 'data: ' 协议前缀
             if chunk.startswith('data: '):
                 text_content = chunk[6:].strip().rstrip('\n')
                 if text_content:
@@ -413,7 +451,7 @@ async def stream_chat_endpoint(request: StreamChatRequest):
             raise HTTPException(status_code=400, detail="thread_id是必需的")
         
         return StreamingResponse(
-            gemini_stream_chat_handler(request.message, request.thread_id),
+            deepseek_stream_chat_handler(request.message, request.thread_id),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
@@ -476,10 +514,71 @@ async def health_check():
     健康检查端点
     """
     return {
-        "status": "healthy", 
+        "status": "healthy",
         "timestamp": datetime.utcnow().isoformat(),
         "supabase_connected": await supabase_client.check_connection()
     }
+
+
+@app.post("/api/chat")
+async def chat_endpoint(request: dict):
+    """
+    处理多轮聊天请求
+    """
+    try:
+        logger.info(f"收到聊天请求: {request}")
+
+        messages = request.get("messages", [])
+        if not messages or not isinstance(messages, list):
+            logger.warning("消息数组为空或格式错误")
+            raise HTTPException(status_code=400, detail="messages 是必需的且必须是数组")
+
+        # 组装格式化的消息列表
+        valid_roles = ["system", "user", "assistant", "tool", "latest_reminder"]
+        formatted_messages = []
+
+        # 添加系统指令
+        formatted_messages.append({
+            "role": "system",
+            "content": "你是 Solo，一个城市漫步伴侣。语气温柔治愈，回复限制在150字内。"
+        })
+
+        # 转换历史消息
+        for i, msg in enumerate(messages):
+            role = msg.get("role", "user")
+            if role == "model":
+                role = "assistant"
+            elif role not in valid_roles:
+                role = "user"
+            formatted_messages.append({
+                "role": role,
+                "content": str(msg.get("content", ""))
+            })
+
+        logger.info(f"发送消息给 DeepSeek: {formatted_messages}")
+
+        # 调用 DeepSeek
+        manager = deepseek_manager
+        if not manager:
+            raise HTTPException(status_code=500, detail="LLM 客户端未初始化")
+
+        # 使用管理器
+        user_message = messages[-1].get("content", "") if messages else ""
+        complete_response = ""
+        async for chunk in manager.generate_stream_response(user_message):
+            if chunk.startswith('data: '):
+                text_content = chunk[6:].strip().rstrip('\n')
+                if text_content:
+                    complete_response += text_content
+
+        if not complete_response:
+            complete_response = "抱歉，我无法生成回复。"
+
+        return {"response": complete_response}
+
+    except Exception as e:
+        logger.error(f"聊天处理错误: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/api/v2/wander-plans")
