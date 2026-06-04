@@ -991,3 +991,164 @@ class PlaywrightBookingExecutionTool:
                 await feedback_callback(feedback)
             except Exception as e:
                 self.logger.error(f"发送反馈失败: {e}")
+
+    async def get_location_by_query(self, query: str) -> Optional[Dict[str, float]]:
+        """通过查询获取位置坐标（模拟高德Geocoding API）"""
+        try:
+            # 模拟地理编码结果
+            # 真实实现中应该调用高德Geocoding API
+            mock_coordinates = {
+                "三里屯": {"lat": 39.9368, "lng": 116.4472},
+                "西单大悦城": {"lat": 39.9058, "lng": 116.3806},
+                "王府井": {"lat": 39.9097, "lng": 116.4074},
+                "后海": {"lat": 39.9388, "lng": 116.3831},
+                "五道口": {"lat": 39.9927, "lng": 116.3347},
+                "朝阳公园": {"lat": 39.9396, "lng": 116.4843},
+                "国贸": {"lat": 39.9097, "lng": 116.4580},
+                "建国门": {"lat": 39.9088, "lng": 116.4360},
+                "四惠": {"lat": 39.9068, "lng": 116.4998},
+                "望京": {"lat": 39.9928, "lng": 116.4712},
+            }
+            
+            # 简单的匹配逻辑
+            for key, coords in mock_coordinates.items():
+                if key in query:
+                    logger.info(f"获取位置成功: {query} -> {coords}")
+                    return coords
+            
+            # 默认位置（北京中心）
+            default_coords = {"lat": 39.9042, "lng": 116.4074}
+            logger.info(f"使用默认位置: {query} -> {default_coords}")
+            return default_coords
+            
+        except Exception as e:
+            logger.error(f"获取位置失败: {e}")
+            return None
+
+    async def route_query_to_pois(self, query: str, radius: int = 1000, results_limit: int = 8) -> List[AmapPoiResult]:
+        """将查询转换为POI列表（模拟高德Place Search API）"""
+        try:
+            # 获取位置坐标
+            location = await self.get_location_by_query(query)
+            if not location:
+                # 如果没有获取到位置，返回空列表
+                return []
+
+            # 模拟POI搜索
+            # 真实实现中应该调用高德Place Search API
+            mock_pois = {
+                "三里屯": [
+                    AmapPoiResult(
+                        id="poi_001",
+                        name="三里屯太古里",
+                        address="北京市朝阳区三里屯路19号",
+                        location=f"{location['lng']},{location['lat']}",
+                        type="购物",
+                        typecode="060000",
+                        distance="50",
+                        rating="4.5",
+                        business_area="三里屯"
+                    ),
+                    AmapPoiResult(
+                        id="poi_002",
+                        name="三里屯酒吧街",
+                        address="北京市朝阳区三里屯路",
+                        location=f"{location['lng']+0.001},{location['lat']+0.001}",
+                        type="餐饮",
+                        typecode="050000",
+                        distance="200",
+                        rating="4.2",
+                        business_area="三里屯"
+                    ),
+                    AmapPoiResult(
+                        id="poi_003",
+                        name="三里屯SOHO",
+                        address="北京市朝阳区三里屯路11号",
+                        location=f"{location['lng']+0.002},{location['lat']+0.002}",
+                        type="商务",
+                        typecode="120000",
+                        distance="300",
+                        rating="4.0",
+                        business_area="三里屯"
+                    ),
+                ],
+                "西单": [
+                    AmapPoiResult(
+                        id="poi_004",
+                        name="西单大悦城",
+                        address="北京市西城区西单北大街131号",
+                        location=f"{location['lng']},{location['lat']}",
+                        type="购物",
+                        typecode="060000",
+                        distance="100",
+                        rating="4.4",
+                        business_area="西单"
+                    ),
+                    AmapPoiResult(
+                        id="poi_005",
+                        name="西单文化广场",
+                        address="北京市西城区西单北大街",
+                        location=f"{location['lng']+0.001},{location['lat']+0.001}",
+                        type="文化",
+                        typecode="100000",
+                        distance="150",
+                        rating="4.1",
+                        business_area="西单"
+                    ),
+                ],
+                "后海": [
+                    AmapPoiResult(
+                        id="poi_006",
+                        name="后海公园",
+                        address="北京市西城区后海北沿",
+                        location=f"{location['lng']},{location['lat']}",
+                        type="景点",
+                        typecode="110000",
+                        distance="50",
+                        rating="4.6",
+                        business_area="什刹海"
+                    ),
+                    AmapPoiResult(
+                        id="poi_007",
+                        name="什刹海",
+                        address="北京市西城区什刹海",
+                        location=f"{location['lng']+0.001},{location['lat']+0.001}",
+                        type="景点",
+                        typecode="110000",
+                        distance="100",
+                        rating="4.7",
+                        business_area="什刹海"
+                    ),
+                ],
+            }
+            
+            # 选择合适的POI列表
+            selected_pois = []
+            for key, pois in mock_pois.items():
+                if key in query:
+                    selected_pois = pois
+                    break
+            
+            # 如果没有匹配，创建通用POI
+            if not selected_pois:
+                selected_pois = [
+                    AmapPoiResult(
+                        id=f"poi_generic_{i+1}",
+                        name=f"{query}附近安静角落{i+1}",
+                        address=f"北京市{query}附近",
+                        location=f"{location['lng']+0.001*i},{location['lat']+0.001*i}",
+                        type="休闲",
+                        typecode="120000",
+                        distance=f"{100*i}",
+                        rating="4.3",
+                        business_area=query
+                    )
+                    for i in range(min(results_limit, 5))
+                ]
+            
+            # 限制返回数量
+            return selected_pois[:results_limit]
+            
+        except Exception as e:
+            logger.error(f"POI搜索失败: {e}")
+            return []

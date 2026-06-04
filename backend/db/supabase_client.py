@@ -251,6 +251,33 @@ class SupabaseClient:
                 threads.append(thread)
         return threads
     
+    async def save_thread_state(self, thread_id: str, metadata: dict) -> bool:
+        """保存线程元数据状态（新接口）"""
+        try:
+            thread_state = await self.get_or_create_thread(thread_id)
+            if not thread_state:
+                return False
+            # 更新metadata
+            if not thread_state.metadata:
+                thread_state.metadata = {}
+            thread_state.metadata.update(metadata)
+            thread_state.updated_at = datetime.utcnow().isoformat()
+            return await self.save_thread(thread_state)
+        except Exception as e:
+            logger.error(f"save_thread_state失败: {e}")
+            return False
+
+    async def load_thread_state(self, thread_id: str) -> dict:
+        """加载线程元数据状态（新接口）"""
+        try:
+            thread_state = await self.get_thread(thread_id)
+            if thread_state and thread_state.metadata:
+                return thread_state.metadata
+            return {}
+        except Exception as e:
+            logger.error(f"load_thread_state失败: {e}")
+            return {}
+
     async def reset_database(self) -> bool:
         """重置模拟数据库（用于测试）"""
         self._threads_db.clear()

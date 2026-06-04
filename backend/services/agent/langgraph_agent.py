@@ -3,14 +3,36 @@ from typing import Dict, Any, List, Optional, Tuple
 from datetime import datetime
 import json
 import re
+import random
 from dataclasses import dataclass, asdict
 from enum import Enum
+
+# 🆕 位置询问库
+LOCATION_ASK_SENTENCES = [
+    "亲爱的，你在哪里呢？我帮你看看附近有什么治愈的好去处～",
+    "你在哪条街呀？我查一下附近有什么安静的地方～",
+    "告诉我你的位置吧，我为你定制今天的独处路线～",
+    "你在哪个区域？我为你找找附近的安静角落～",
+    "在哪里呢？我帮你查查附近有什么适合一个人的小确幸～",
+    "你在哪儿呀？我帮你看看附近有什么好去处～",
+    "你在哪儿呢？我帮你瞧瞧附近有什么舒缓心情的地方～",
+    "你在哪儿？我为你找找附近适合独处的地方～",
+    "在你的位置上吗？我帮你瞅瞅附近有什么好去处～",
+    "你现在在哪个地方？我帮你看看有什么方法可以舒缓一下～",
+    "你在哪儿呀？我帮你瞅瞅附近有什么安静的地方可以待会儿～",
+    "你在哪儿呢？我帮你看看周围有什么治愈的地方～",
+    "你在哪个街呀？我帮你看看附近有什么一个人可以待的地方～",
+    "你在哪儿呢？我帮你找找附近有什么安静的地方～",
+]
 
 from data_types import ThreadState, CheckpointData
 from services.data.scenario_generator import EnhancedScenarioGenerator
 from services.tools.web_search_tool import WebSearchTool, SearchQuery, BusinessInfo
 from services.tools.booking_safety_gate import BookingSafetyGate, BookingRequest, BookingType, RiskAssessment
-from services.tools.booking_execution_tool import PlaywrightBookingExecutionTool, ExecutionFeedback, PlaywrightBookingResult
+from services.tools.booking_execution_tool import (
+    PlaywrightBookingExecutionTool, ExecutionFeedback, PlaywrightBookingResult,
+    AmapPoiResult
+)
 
 logger = logging.getLogger(__name__)
 
@@ -55,15 +77,84 @@ class LangGraphAgent:
         self.checkpoint_data = {}
         self.emotion_memory = {}
         self.scenario_generator = EnhancedScenarioGenerator()
-        self.web_search_tool = None  # 延迟初始化
+        self.web_search_tool = WebSearchTool()  # 已初始化，用于Tavily实时检索
         self.booking_safety_gate = BookingSafetyGate()
-        self.booking_execution_tool = None  # 延迟初始化
+        self.booking_execution_tool = PlaywrightBookingExecutionTool()  # 🆕 初始化地理工具
         
         # 初始化 Supabase 客户端用于检查点持久化
         from db.supabase_client import SupabaseClient
         self.supabase_client = SupabaseClient()
         
         logger.info("LangGraph Agent 初始化完成（慢生活轨道模式）")
+
+    async def _intercept_and_store_address(self, message: str, thread_state: ThreadState) -> Dict[str, Any]:
+        """
+        三步动作：
+        1. 从用户当前message中尝试提取地址
+        2. 与thread_state.metadata中存量地址比对校验
+        3. 若不存在，返回"AI询问地点"的候选句
+        
+        返回结构：
+        {
+          "address_exists": bool,
+          "address_value": Optional[str],
+          "ai_ask_location_sentence": Optional[str],
+          "lat": Optional[float],
+          "lng": Optional[float]
+        }
+        """
+        
+        # 读历史槽位
+        history_slot = thread_state.metadata.get("address_slot", {})
+        history_location = history_slot.get("location")
+        
+        # 从用户当前输入简单提取地址（中文地址常见规律）
+        location_patterns = [
+            r'(在|到|去)(.*?)(附近|旁边|楼下|周围)',  # "我在三里屯soho附近"
+            r'位于(.*?)(路|街|道|号)',               # "我位于朝阳区东三环中路5号"
+            r'(.*?)(路|街|道)[0-9０-９]+号',        # "建国门外大街99号"
+        ]
+        
+        current_location = None
+        for pattern in location_patterns:
+            match = re.search(pattern, message)
+            if match:
+                current_location = match.group(2) if len(match.groups()) > 1 else match.group(1)
+                break  # 找到一个就停止
+        if not current_location:
+            # fallback：匹配2+个中文字连续串（如"三里屯"、"五道口")
+            fallback_match = re.search(r'([一-龥]{2,})', message)
+            if fallback_match:
+                current_location = fallback_match.group(1)
+        
+        # 若新位置存在且跟历史不一致，则覆盖
+        if current_location and current_location != history_location:
+            history_slot = {
+                "location": current_location,
+                "lat": None,  # 将在分支A中通过Geo API注入
+                "lng": None,
+                "updated_at": datetime.now().isoformat()
+            }
+            thread_state.metadata["address_slot"] = history_slot
+        
+        address_exists = bool(history_slot.get("location"))
+        if address_exists:
+            return {
+                "address_exists": True,
+                "address_value": history_slot["location"],
+                "lat": history_slot.get("lat"),
+                "lng": history_slot.get("lng"),
+                "ai_ask_location_sentence": None
+            }
+        
+        # 若地址槽位为空，温柔生成询问语句（分支B）
+        return {
+            "address_exists": False,
+            "address_value": None,
+            "lat": None,
+            "lng": None,
+            "ai_ask_location_sentence": random.choice(LOCATION_ASK_SENTENCES)
+        }
     
     async def process_message(self, message: str, thread_state: ThreadState) -> Dict[str, Any]:
         """
@@ -72,11 +163,35 @@ class LangGraphAgent:
         """
         logger.info(f"处理消息: {message}")
         
+        # 🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕
+        # Step 4.1: 先从Supabase load历史metadata，存到ThreadState (如果未缓存)
+        if self.supabase_client and not thread_state.metadata:
+            try:
+                history = await self.supabase_client.load_thread_state(thread_state.thread_id)
+                if history:
+                    thread_state.metadata.update(history)
+                    logger.info(f"已加载线程{thread_state.thread_id}历史metadata")
+            except Exception as e:
+                logger.warning(f"Supabase load失败(忽略): {e}")
+        
         # 1. 情感记忆层处理
         emotion_profile = await self._emotion_sensing(message, thread_state)
         
         # 2. 氛围强度评估
         vibe_context = await self._vibe_intensity_assessment(emotion_profile, thread_state)
+        
+        # 🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕
+        # Step 1: 地址拦截
+        address_result = await self._intercept_and_store_address(message, thread_state)
+        if not address_result["address_exists"]:
+            # 🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕
+            # Step 5: 分支B: 温柔地问
+            return {
+                "type": "clarification",
+                "empathy_response": address_result["ai_ask_location_sentence"],
+                "requires_clarification": True,
+                "address_query": True,
+            }
         
         # 3. 轻柔澄清循环 (如果需要)
         if self._needs_clarification(message, emotion_profile):
@@ -96,6 +211,53 @@ class LangGraphAgent:
         
         # 6. 生成完整详细方案
         detailed_scenario = await self._generate_detailed_scenario(vibe_context, message, quest_narrative)
+        
+        # 🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕
+        # Step 2: 分支A: 通过高德Geo注入lat, lng（如果尚未注入）
+        if address_result["lat"] is None or address_result["lng"] is None:
+            location_coords = await self.booking_execution_tool.get_location_by_query(
+                thread_state.metadata["address_slot"]["location"]
+            )
+            if location_coords:
+                thread_state.metadata["address_slot"]["lat"] = location_coords["lat"]
+                thread_state.metadata["address_slot"]["lng"] = location_coords["lng"]
+                logger.info(f"通过Geo注入位置: {thread_state.metadata['address_slot']['location']} (lat={location_coords['lat']}, lng={location_coords['lng']})")
+        
+        # 🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕
+        # Step 3: 分支A: plans契约内容生成（与AmapPoiResult.lat/lng保持一致）
+        lat = thread_state.metadata["address_slot"].get("lat")
+        lng = thread_state.metadata["address_slot"].get("lng")
+        # 使用高德POI检索附近安静去处
+        if lat and lng:
+            nearby_pois = await self.booking_execution_tool.route_query_to_pois(
+                thread_state.metadata["address_slot"]["location"],  # 或用lat/lng周边搜索
+                radius=1000,
+                results_limit=8
+            )
+            plans = []  # 适配AmapPoiResult结构
+            for poi in nearby_pois:
+                # 从AmapPoiResult.location解析lat/lng
+                try:
+                    lng_str, lat_str = poi.location.split(',')
+                    poi_lat = float(lat_str)
+                    poi_lng = float(lng_str)
+                except (ValueError, AttributeError):
+                    # 如果解析失败，使用默认值
+                    poi_lat = lat
+                    poi_lng = lng
+                
+                plans.append({
+                    "merchant_name": poi.name,
+                    "merchant_address": poi.address,
+                    "lat": poi_lat,
+                    "lng": poi_lng,
+                    "distance": poi.distance if hasattr(poi, "distance") else None,
+                    "rating": float(poi.rating) if poi.rating and poi.rating.replace('.', '').isdigit() else None,
+                })
+            # 写入方案契约
+            if not hasattr(detailed_scenario, "plans"):
+                detailed_scenario.plans = []
+            detailed_scenario.plans.extend(plans)
         
         # 7. 实时信息检索（如果需要）
         updated_scenario = await self._real_time_info_retrieval(detailed_scenario, message)
@@ -117,6 +279,14 @@ class LangGraphAgent:
             "copresence": copresence_info,
             "last_message": message
         })
+        
+        # 🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕
+        # Step 4.2: 处理完后把地址等信息persist到Supabase (下一次对话不丢失)
+        if self.supabase_client:
+            try:
+                await self.supabase_client.save_thread_state(thread_state.thread_id, thread_state.metadata)
+            except Exception as e:
+                logger.warning(f"Supabase save失败(忽略): {e}")
         
         # 转换详细方案为API格式
         api_scenario = self.scenario_generator.convert_to_api_format(detailed_scenario)
