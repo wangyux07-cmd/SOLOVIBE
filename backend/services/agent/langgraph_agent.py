@@ -457,6 +457,12 @@ class LangGraphAgent:
             result["booking_info"] = booking_assessment
             result["requires_confirmation"] = booking_assessment.get("needs_confirmation", False)
         
+        # 添加地址状态信息，供上层使用(Protocol v2.0 修复)
+        result["address_status"] = {
+            "has_location": address_result["address_exists"],
+            "location": address_result["address_value"]
+        }
+        
         return result
 
     async def _emotion_sensing(self, message: str, thread_state: ThreadState) -> EmotionProfile:
@@ -1155,16 +1161,29 @@ class LangGraphAgent:
                     )
                     
                     try:
-                        business_info = await self.web_search_tool.search_business_info(status_query)
+                        # 使用异步上下文管理器确保session正确初始化(Protocol v2.0修复)
+                        async with self.web_search_tool as search_tool:
+                            business_info = await search_tool.search_business_info(status_query)
                         
                         # 如果实时检索成功，增强商家信息
+                        logger.info(f"[DEBUG] 商家{merchant_name}返回的business_info: {business_info}, type: {type(business_info)}")
                         enhanced_plan = plan.copy()
-                        enhanced_plan["real_time_status"] = {
-                            "is_open": business_info.is_open,
-                            "current_status": business_info.current_status,
-                            "last_updated": datetime.utcnow().isoformat()
-                        }
-                        enhanced_plan["online_availability"] = business_info.is_open
+                        if business_info and hasattr(business_info, 'is_open'):
+                            enhanced_plan["real_time_status"] = {
+                                "is_open": business_info.is_open,
+                                "current_status": business_info.current_status,
+                                "last_updated": datetime.utcnow().isoformat()
+                            }
+                            enhanced_plan["online_availability"] = business_info.is_open
+                            logger.info(f"[DEBUG] 成功设置商家{merchant_name}的real_time_status")
+                        else:
+                            logger.warning(f"[DEBUG] business_info无效，使用默认值: {business_info}")
+                            enhanced_plan["real_time_status"] = {
+                                "is_open": True,
+                                "current_status": "unknown",
+                                "last_updated": datetime.utcnow().isoformat(),
+                                "error": "business_info对象无效"
+                            }
                         
                         enhanced_plans.append(enhanced_plan)
                         
@@ -1207,12 +1226,24 @@ class LangGraphAgent:
         
         scenario_mode = mode_mapping.get(vibe_context.mode.value, "healing")
         
-        # 过滤出可用的商家（仅开放状态）
+        # 过滤出可用的商家（仅开放状态）(Protocol v2.0修复)
         available_plans = []
         if enhanced_plans:
-            available_plans = [plan for plan in enhanced_plans 
-                            if plan.get("real_time_status", {}).get("is_open", True) and 
-                            plan.get("real_time_status", {}).get("current_status") in ["open", "unknown"]]
+            for plan in enhanced_plans:
+                real_time_status = plan.get("real_time_status", {})
+                is_open = real_time_status.get("is_open", True)  # 默认开放
+                current_status = real_time_status.get("current_status")
+                
+                # 宽松的可用性判断：有实时状态且开放，或者没有实时状态（降级情况）
+                is_available = (
+                    (not real_time_status and is_open) or  # 无实时状态，默认可用
+                    (real_time_status and is_open and current_status in ["open", "unknown"])  # 有实时状态且开放
+                )
+                
+                if is_available:
+                    available_plans.append(plan)
+                
+                logger.info(f"[DEBUG] 商家过滤: {plan.get('merchant_name', '未知')} - 实时状态: {real_time_status}, 可用: {is_available}")
         
         logger.info(f"可用商家数量: {len(available_plans)} / {len(enhanced_plans) if enhanced_plans else 0}")
         

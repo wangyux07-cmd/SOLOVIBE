@@ -467,62 +467,62 @@ async def deepseek_stream_chat_handler(message: str, thread_id: str) -> AsyncGen
                     complete_response = empathy_text
                 # 🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕
                 # 走新流程：从 LangGraph 里拿到详细场景、再让 DeepSeek 润色输出
-                detailed_scenario = process_result.get("detailed_scenario")
-                if detailed_scenario and detailed_scenario.get("enhanced_response"):
-                    # 🎯 即使有详细方案，也让 LLM 润色后再流式输出
-                    enhanced_text = detailed_scenario["enhanced_response"]
-                    # 让 LLM 再加工一下，加入情绪
-                    prompt = f"以下是场景内容，请用治愈语气润色成150字以内的回应：\n{enhanced_text}\n\n用户状态：压力={emotion_context.get('pressure_level', 5)}, 能量={emotion_context.get('energy_level', 5)}"
-                    # 事件驱动输出商业推荐
-                    final_text = ""  # 用于收集最终文本
-                    async for chunk in deepseek_manager.generate_stream_response(prompt, emotion_context):
-                        if chunk.startswith('data: '):
-                            text_content = chunk[6:].strip().rstrip('\n')
-                            if text_content:
-                                complete_response += text_content
-                                final_text += text_content
-                                # 发送文本chunk
-                                chunk_event = f"event: text_chunk\ndata: {json.dumps({'content': text_content}, ensure_ascii=False)}\n\n"
-                                yield chunk_event
-                    
-                    # 发送完整的empathy事件
-                    if final_text:
-                        empathy_event = f"event: empathy\ndata: {json.dumps({'text': final_text}, ensure_ascii=False)}\n\n"
-                        # 检查是否有店家信息需要推荐
-                        detailed_scenario = process_result.get("detailed_scenario")
-                        if detailed_scenario and "merchant" in detailed_scenario:
-                            merchant = detailed_scenario["merchant"]
-                            recommendation_event = f"event: business_recommendation\ndata: {json.dumps({
-                                'name': merchant.name if hasattr(merchant, 'name') else str(merchant), 
-                                'address': merchant.location.address if hasattr(merchant, 'location') else '',
-                                'description': final_text[:100]
-                            }, ensure_ascii=False)}\n\n"
-                            yield recommendation_event
-                else:
-                    # 降级到纯 LLM 润色
-                    fallback_input = f"""参考上下文: {json.dumps(process_result, ensure_ascii=False)} \n请给用户一个治愈的150字以内回应:"""
-                    # 降级情况的流式事件输出
-                    async for chunk in deepseek_manager.generate_stream_response(fallback_input, emotion_context):
-                        if chunk.startswith('data: '):
-                            text_content = chunk[6:].strip().rstrip('\n')
-                            if text_content:
-                                complete_response += text_content
-                                # Fallback也使用事件
-                                chunk_event = f"event: text_chunk\ndata: {json.dumps({'content': text_content}, ensure_ascii=False)}\n\n"
-                                yield chunk_event
+            detailed_scenario = process_result.get("detailed_scenario")
+            if detailed_scenario and hasattr(detailed_scenario, "enhanced_response"):
+                # 🎯 即使有详细方案，也让 LLM 润色后再流式输出
+                enhanced_text = getattr(detailed_scenario, "enhanced_response", None)
+                # 让 LLM 再加工一下，加入情绪
+                prompt = f"以下是场景内容，请用治愈语气润色成150字以内的回应：\n{enhanced_text}\n\n用户状态：压力={emotion_context.get('pressure_level', 5)}, 能量={emotion_context.get('energy_level', 5)}"
+                # 事件驱动输出商业推荐
+                final_text = ""  # 用于收集最终文本
+                async for chunk in deepseek_manager.generate_stream_response(prompt, emotion_context):
+                    if chunk.startswith('data: '):
+                        text_content = chunk[6:].strip().rstrip('\n')
+                        if text_content:
+                            complete_response += text_content
+                            final_text += text_content
+                            # 发送文本chunk
+                            chunk_event = f"event: text_chunk\ndata: {json.dumps({'content': text_content}, ensure_ascii=False)}\n\n"
+                            yield chunk_event
+                
+                # 发送完整的empathy事件
+                if final_text:
+                    empathy_event = f"event: empathy\ndata: {json.dumps({'text': final_text}, ensure_ascii=False)}\n\n"
+            # 检查是否有店家信息需要推荐
+            detailed_scenario = process_result.get("detailed_scenario")
+            if detailed_scenario and hasattr(detailed_scenario, "merchant"):
+                merchant = getattr(detailed_scenario, "merchant", None)
+                recommendation_event = f"event: business_recommendation\ndata: {json.dumps({
+                    'name': merchant.name if hasattr(merchant, 'name') else str(merchant), 
+                    'address': merchant.location.address if hasattr(merchant, 'location') else '',
+                    'description': final_text[:100]
+                }, ensure_ascii=False)}\n\n"
+                yield recommendation_event
+            else:
+                # 降级到纯 LLM 润色
+                fallback_input = f"""参考上下文: {json.dumps(process_result, ensure_ascii=False)} \n请给用户一个治愈的150字以内回应:"""
+                # 降级情况的流式事件输出
+                async for chunk in deepseek_manager.generate_stream_response(fallback_input, emotion_context):
+                    if chunk.startswith('data: '):
+                        text_content = chunk[6:].strip().rstrip('\n')
+                        if text_content:
+                            complete_response += text_content
+                            # Fallback也使用事件
+                            chunk_event = f"event: text_chunk\ndata: {json.dumps({'content': text_content}, ensure_ascii=False)}\n\n"
+                            yield chunk_event
         except Exception as e:
             import traceback
             logger.error(f"LangGraph流程执行失败: {str(e)}")
             logger.error(f"详细 Traceback:\n{traceback.format_exc()}")
-            # 降级到纯LLM
-            async for chunk in deepseek_manager.generate_stream_response(message, emotion_context):
-                if chunk.startswith('data: '):
-                    text_content = chunk[6:].strip().rstrip('\n')
-                    if text_content:
-                        complete_response += text_content
-                        # 异常时也使用事件
-                        chunk_event = f"event: error_fallback\ndata: {json.dumps({'content': text_content}, ensure_ascii=False)}\n\n"
-                        yield chunk_event
+        # 降级到纯LLM
+        async for chunk in deepseek_manager.generate_stream_response(message, emotion_context):
+            if chunk.startswith('data: '):
+                text_content = chunk[6:].strip().rstrip('\n')
+                if text_content:
+                    complete_response += text_content
+                    # 异常时也使用事件
+                    chunk_event = f"event: error_fallback\ndata: {json.dumps({'content': text_content}, ensure_ascii=False)}\n\n"
+                    yield chunk_event
         
         # 4. 默默在后台将对话安全地保存到 Supabase 数据库中
         try:
@@ -540,11 +540,12 @@ async def deepseek_stream_chat_handler(message: str, thread_id: str) -> AsyncGen
             logger.info("对话已成功同步保存至 Supabase 数据库")
         except Exception as db_error:
             logger.warning(f"数据库保存失败: {db_error}，已自动激活降级方案")
-            
+
     except Exception as e:
         logger.error(f"流式数据管道异常: {str(e)}")
         error_message = "抱歉，我的大脑稍微有点断网了 🧠💦。不过别担心，给你推荐去附近的河边散散步、喝一杯手冲咖啡吧！"
         yield error_message  # 发生错误时，也直接返回纯文本兜底
+
 
 
 @app.post("/api/v1/stream_chat", response_model=StreamChatResponse)
@@ -728,21 +729,37 @@ async def chat_endpoint(request: dict):
             if process_result.get("type") == "clarification":
                 response_text = process_result["empathy_response"]
             else:
-                response_text = process_result.get("empathy_response", "抱歉，我无法生成回复。")
-                
+                # 对于complete_response，优先使用详细方案信息，而不是简单的共情回复
+                detailed_scenario = process_result.get("detailed_scenario")
+                if detailed_scenario and hasattr(detailed_scenario, 'merchant') and getattr(detailed_scenario, 'merchant', None):
+                    # 构建详细的商业推荐回复
+                    merchant_obj = getattr(detailed_scenario, 'merchant')
+                    merchant_name = getattr(merchant_obj, 'name', '推荐商家')
+                    response_text = f"{process_result.get('empathy_response', '')} 我为你找到了{merchant_name}，这是一个很棒的去处！"
+                else:
+                    # 降级到empathy response
+                    response_text = process_result.get("empathy_response", "很棒的想法！让我为你推荐一些适合的地方。")
+            
+            # Protocol v2.0: 根据地址状态生成state_info (Protocol v2.0 修复)
+            # 直接从agent返回结果中读取地址状态
+            has_location = False
+            if process_result.get("type") == "clarification" and "address_query" in process_result:
+                has_location = False  # 需要询问地址
+            elif process_result.get("type") in ["response", "complete_response"]:
+                # 从agent返回的地址状态信息判断
+                address_status = process_result.get("address_status", {})
+                logger.info(f"[DEBUG-StateInfo] Agent返回的address_status: {address_status}")
+                has_location = address_status.get("has_location", True)  # 能生成方案说明有地址
+                has_location = bool(has_location)  # 强制转换
+            needs_user_input = process_result.get("type") == "clarification" and "address_query" in process_result
+        
         except Exception as e:
             logger.error(f"对话处理错误: {e}")
             response_text = "抱歉，处理消息时遇到问题"
+            has_location = False
+            needs_user_input = True
             # 协议v2: 错误时也保持thread_id一致性
             final_thread_id = stable_thread_id
-        
-        # Protocol v2.0: 根据地址处理结果生成state_info (Protocol v2.0 修复)
-        # 直接从process_result中读取地址状态，而不是依赖conversation_manager的状态缓存
-        has_location = address_result.get("address_exists", False) if 'address_result' in locals() else False
-        # 如果process_result显示已经有详细方案说明地址已存在
-        if not has_location and process_result.get("type") == "response":
-            has_location = True  # 能生成方案的说明地址已经存store
-        needs_user_input = process_result.get("type") == "clarification" and "address_query" in process_result
 
         return {
             "response": response_text, 
