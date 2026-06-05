@@ -148,8 +148,8 @@ class DeepSeekLLMManager:
             # 添加用户消息
             messages.append({"role": "user", "content": user_message})
             
-            # 调用 DeepSeek 流式生成
-            response_stream = await self.client.chat.completions.create(
+            # 调用 DeepSeek 流式生成（移除了 await ！）
+            response_stream = self.client.chat.completions.create(
                 model="deepseek-chat",
                 messages=messages,
                 **self.generation_config,
