@@ -439,7 +439,22 @@ class EnhancedScenarioGenerator:
         })
         
         # 交通出行阶段
-        travel_end_time = current_time + timedelta(minutes=route.time_schedule[0].end_time if route.time_schedule else 30)
+        # 修复：TimeSlot.end_time 是字符串，不直接用于minutes
+        # 改用动态分钟数
+        travel_minutes = 30  # 默认30分钟
+        if route.time_schedule:
+            # 从 TimeSlot 字符串解析出总分钟数（简单估算）
+            end_time_str = route.time_schedule[0].end_time  # "10:30" 格式
+            if isinstance(end_time_str, str) and ':' in end_time_str:
+                h, m = map(int, end_time_str.split(':'))
+                current_hour, current_minute = current_time.hour, current_time.minute
+                # 估算经过分钟
+                total_current_minutes = current_hour * 60 + current_minute
+                total_target_minutes = h * 60 + m
+                if total_target_minutes < total_current_minutes:
+                    total_target_minutes += 24 * 60  # 跨天
+                travel_minutes = max(1, total_target_minutes - total_current_minutes)
+        travel_end_time = current_time + timedelta(minutes=travel_minutes)
         itinerary.append({
             "time": (current_time + timedelta(minutes=15)).strftime("%H:%M"),
             "title": "🚶‍♀️ 前往目的地",
@@ -1017,7 +1032,7 @@ class EnhancedScenarioGenerator:
                 "location": {
                     "latitude": scenario.merchant.location.latitude,
                     "longitude": scenario.merchant.location.longitude,
-                    "city": scenario.merchant.location.city,
+                    "city": getattr(scenario.merchant.location, 'district', '未知城市'),
                     "area": scenario.merchant.location.area
                 }
             },

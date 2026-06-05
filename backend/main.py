@@ -437,26 +437,53 @@ async def deepseek_stream_chat_handler(message: str, thread_id: str) -> AsyncGen
         
         # 3. 收集回复并直接向前端 yield 纯文本字符
         complete_response = ""
-        logger.info("步骤3: 开始调用DeepSeek生成流式回复...")
+        logger.info("步骤3: 开始调用LangGraph process_message执行完整流程...")
         
         try:
+            # 🚨 核心变更：调用 LangGraph 完整流程，不是只跑情绪分析+直连 LLM
+            process_result = await langgraph_agent.process_message(message, thread_state)
+            
+            # 判断返回类型
+            if process_result.get("type") == "clarification":
+                # 需要进一步澄清，比如问地址
+                empathy_text = process_result.get("empathy_response", "亲爱的，你在哪里呢？我帮你看看附近有什么好去处～")              
+                complete_response = empathy_text
+                yield empathy_text
+            else:
+                # 🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕
+                # 走新流程：从 LangGraph 里拿到详细场景、再让 DeepSeek 润色输出
+                detailed_scenario = process_result.get("detailed_scenario")
+                if detailed_scenario and detailed_scenario.get("enhanced_response"):
+                    # 🎯 即使有详细方案，也让 LLM 润色后再流式输出
+                    enhanced_text = detailed_scenario["enhanced_response"]
+                    # 让 LLM 再加工一下，加入情绪
+                    prompt = f"以下是场景内容，请用治愈语气润色成150字以内的回应：\n{enhanced_text}\n\n用户状态：压力={emotion_context.get('pressure_level', 5)}, 能量={emotion_context.get('energy_level', 5)}"
+                    async for chunk in deepseek_manager.generate_stream_response(prompt, emotion_context):
+                        if chunk.startswith('data: '):
+                            text_content = chunk[6:].strip().rstrip('\n')
+                            if text_content:
+                                complete_response += text_content
+                                yield text_content
+                else:
+                    # 降级到纯 LLM 润色
+                    fallback_input = f"""参考上下文: {json.dumps(process_result, ensure_ascii=False)} \n请给用户一个治愈的150字以内回应:"""
+                    async for chunk in deepseek_manager.generate_stream_response(fallback_input, emotion_context):
+                        if chunk.startswith('data: '):
+                            text_content = chunk[6:].strip().rstrip('\n')
+                            if text_content:
+                                complete_response += text_content
+                                yield text_content
+        except Exception as e:
+            import traceback
+            logger.error(f"LangGraph流程执行失败: {str(e)}")
+            logger.error(f"详细 Traceback:\n{traceback.format_exc()}")
+            # 降级到纯LLM
             async for chunk in deepseek_manager.generate_stream_response(message, emotion_context):
-                logger.info(f"收到DeepSeek chunk: {chunk[:50]}...")  # 只记录前50个字符
-                
-                # 剥离原先 deepseek_manager 产生的 'data: ' 协议前缀
                 if chunk.startswith('data: '):
                     text_content = chunk[6:].strip().rstrip('\n')
                     if text_content:
-                        # 过滤掉无意义的旧结束标记，只放行真正的文本碎片
-                        if "STREAM_END" not in text_content:
-                            complete_response += text_content
-                            yield text_content
-        except asyncio.TimeoutError:
-            logger.warning("DeepSeek 流式响应超时")
-            yield "响应超时，请稍后再试"
-        except Exception as e:
-            logger.error(f"DeepSeek 流式响应错误: {str(e)}")
-            yield "AI 服务暂时不可用，请稍后再试"
+                        complete_response += text_content
+                        yield text_content
         
         # 4. 默默在后台将对话安全地保存到 Supabase 数据库中
         try:
