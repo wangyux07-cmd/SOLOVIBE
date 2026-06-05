@@ -94,6 +94,8 @@ class Merchant:
     wifi_available: bool = True
     power_outlets: bool = True
     parking_available: bool = False
+    real_time_status: Optional[Dict[str, Any]] = None  # 实时状态
+    recommendations: List[str] = None  # 推荐信息
 
 
 # === 咖啡店数据 ===

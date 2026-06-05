@@ -277,6 +277,10 @@ class SupabaseClient:
         except Exception as e:
             logger.error(f"load_thread_state失败: {e}")
             return {}
+    
+    async def add_message(self, thread_id: str, role: str, content: str) -> bool:
+        """添加消息到线程（别名方法，调用save_message）"""
+        return await self.save_message(thread_id, role, content)
 
     async def reset_database(self) -> bool:
         """重置模拟数据库（用于测试）"""

@@ -263,12 +263,35 @@ class LangGraphAgent:
         copresence_info = await self._generate_copresense_enhancement(thread_state)
         
         # 保存完整的状态检查点
+        # 序列化详细方案为字典，确保可以被JSON序列化
+        serialized_scenario = None
+        if detailed_scenario:
+            try:
+                from dataclasses import asdict
+                serialized_scenario = asdict(detailed_scenario) if hasattr(detailed_scenario, '__dataclass_fields__') else str(detailed_scenario)
+            except Exception as e:
+                logger.warning(f"序列化详细方案失败: {e}，使用字符串表示")
+                serialized_scenario = str(detailed_scenario)
+        
+        serialized_updated_scenario = None
+        if updated_scenario:
+            try:
+                serialized_updated_scenario = asdict(updated_scenario) if hasattr(updated_scenario, '__dataclass_fields__') else str(updated_scenario)
+            except Exception as e:
+                logger.warning(f"序列化更新方案失败: {e}，使用字符串表示")
+                serialized_updated_scenario = str(updated_scenario)
+        
         await self._save_enhanced_checkpoint(thread_state.thread_id, {
             "emotion_profile": asdict(emotion_profile),
-            "vibe_context": asdict(vibe_context),
+            "vibe_context": {
+                "vibe_score": vibe_context.vibe_score,
+                "energy_level": vibe_context.energy_level,
+                "mode": vibe_context.mode.value,  # 转换为字符串
+                "social_tendency": vibe_context.social_tendency
+            },
             "quest_narrative": asdict(quest_narrative),
-            "detailed_scenario": detailed_scenario,
-            "updated_scenario": updated_scenario,
+            "detailed_scenario": serialized_scenario,
+            "updated_scenario": serialized_updated_scenario,
             "booking_assessment": booking_assessment,
             "copresence": copresence_info,
             "last_message": message
@@ -610,19 +633,24 @@ class LangGraphAgent:
                                          detailed_scenario: Any,
                                          user_message: str) -> Optional[Dict[str, Any]]:
         """评估预订需求 - 判断是否需要执行预订"""
-        scenario_data = detailed_scenario
-        if hasattr(detailed_scenario, 'detailed_scenario'):
-            scenario_data = detailed_scenario.detailed_scenario
-        
+        # 获取商家和费用信息
         try:
-            merchant_info = scenario_data.get('merchant_info', {})
-            cost_info = scenario_data.get('cost_breakdown', {})
+            merchant_info = {
+                'name': detailed_scenario.merchant.name,
+                'address': detailed_scenario.merchant.location.address,
+                'type': detailed_scenario.merchant.type.value,
+                'contact': detailed_scenario.merchant.contact
+            }
+            cost_info = {
+                'consumption': detailed_scenario.cost_breakdown.consumption,
+                'total': detailed_scenario.cost_breakdown.total
+            }
             
             # 判断是否需要预订
             booking_indicators = [
                 "预订" in user_message or "预约" in user_message,
                 cost_info.get('consumption', 0) > 50,  # 消费超过50元
-                merchant_info.get('type') in ['餐厅', '咖啡店'],  # 需要预订的场所
+                merchant_info.get('type') in ['咖啡店', '餐厅'],  # 需要预订的场所
                 "指定时间" in user_message or "特定时间" in user_message
             ]
             
