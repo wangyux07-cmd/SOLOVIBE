@@ -175,10 +175,10 @@ class ConversationManager:
             return process_result, thread_id
             
         except Exception as e:
-            logger.error(f"消息处理失败: {e}")
+            logger.error(f"消息处理失败: {e}", exc_info=True)  # 添加完整堆栈信息
             
-            # 错误恢复：创建新的线程重试
-            if "JSON serializable" in str(e) or "scenario_data" in str(e):
+            # 错误恢复：只在真正的序列化错误时创建新线程
+            if "JSON serializable" in str(e) or "scenario_data is not defined" in str(e):
                 logger.info(f"检测到序列化错误，尝试新建线程: {thread_id}")
                 new_thread_id = str(uuid.uuid4())
                 thread_state = ThreadState(

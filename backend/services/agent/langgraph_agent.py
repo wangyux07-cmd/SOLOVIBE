@@ -717,7 +717,7 @@ class LangGraphAgent:
                     logger.info(f"商家状态异常 - {merchant_name}: {business_info.current_status}")
                     
                     # 更新方案信息
-                    updated_scenario = scenario_data.copy()
+                    updated_scenario = detailed_scenario.copy() if hasattr(detailed_scenario, 'copy') else dict(detailed_scenario) if hasattr(detailed_scenario, 'keys') else detailed_scenario
                     updated_scenario['merchant_info']['real_time_status'] = {
                         'is_open': business_info.is_open,
                         'current_status': business_info.current_status,
@@ -729,7 +729,7 @@ class LangGraphAgent:
                     if not business_info.is_open:
                         updated_scenario['merchant_info']['recommendations'] = [
                             "商家当前暂未营业，建议改期前往",
-                            f"营业时间建议致电确认: {scenario_data.get('merchant_info', {}).get('contact', '未提供')}",
+                            f"营业时间建议致电确认: {detailed_scenario.get('merchant_info', {}).get('contact', '未提供') if hasattr(detailed_scenario, 'get') else '未提供'}",
                             "或选择备选方案"
                         ]
                     
@@ -739,7 +739,7 @@ class LangGraphAgent:
             logger.error(f"实时信息检索失败: {e}")
             # 实时信息获取失败不影响整体流程，返回原始方案
         
-        return scenario_data
+        return detailed_scenario
     
     async def _assess_booking_requirements(self, 
                                          detailed_scenario: Any,

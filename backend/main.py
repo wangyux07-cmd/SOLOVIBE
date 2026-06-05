@@ -645,6 +645,7 @@ async def chat_endpoint(request: dict):
                 thread_id=thread_id,
                 client_ip=client_ip
             )
+            logger.info(f"[Thread追踪] 输入: {thread_id} → 稳定化: {stable_thread_id}")
             
             # 处理消息
             process_result, final_thread_id = await conversation_manager.process_message(
@@ -652,6 +653,7 @@ async def chat_endpoint(request: dict):
                 thread_id=stable_thread_id,
                 client_ip=client_ip
             )
+            logger.info(f"[Thread追踪] 处理完成: {stable_thread_id} → 输出: {final_thread_id}")
             
             # 生成返回响应
             if process_result.get("type") == "clarification":
