@@ -268,10 +268,9 @@ class LangGraphAgent:
         # Step 1: 从当前消息中提取地址并更新state
         address_result = await self._intercept_and_store_address(message, thread_state)
         
-        # Step 2: 基于state中的持久化地址信息做决策
-        if not thread_state.metadata.get("address_slot", {}).get("location"):
-            # 🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕
-            # Step 5: 分支B: 温柔地问（保护隐私，只问地铁站或区域）
+        # Step 2: 基于地址处理结果做决策（Protocol v2.0 修复）  
+        if not address_result["address_exists"]:
+            # 分支B: 地址不存在，温柔询问（保护隐私，只问地铁站或区域）
             return {
                 "type": "clarification",
                 "empathy_response": address_result["ai_ask_location_sentence"],
@@ -295,11 +294,8 @@ class LangGraphAgent:
         # 5. 独享任务映射
         quest_narrative = await self._solo_friendly_quest_mapper(vibe_context, message)
         
-        # 6. 生成完整详细方案
-        detailed_scenario = await self._generate_detailed_scenario(vibe_context, message, quest_narrative)
-        
         # 🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕
-        # Step 2: 分支A: 通过高德Geo注入lat, lng（如果尚未注入）
+        # Step 1: 通过高德Geo注入坐标（如果尚未注入）
         if address_result["lat"] is None or address_result["lng"] is None:
             location_coords = await self.booking_execution_tool.get_location_by_query(
                 thread_state.metadata["address_slot"]["location"]
@@ -310,29 +306,28 @@ class LangGraphAgent:
                 logger.info(f"通过Geo注入位置: {thread_state.metadata['address_slot']['location']} (lat={location_coords['lat']}, lng={location_coords['lng']})")
         
         # 🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕
-        # Step 3: 分支A: plans契约内容生成（与AmapPoiResult.lat/lng保持一致）
+        # Step 2: 先用小范围POI搜索获取附近的候选商家
+        initial_plans = []
         lat = thread_state.metadata["address_slot"].get("lat")
         lng = thread_state.metadata["address_slot"].get("lng")
-        # 使用高德POI检索附近安静去处
+        
         if lat and lng:
             nearby_pois = await self.booking_execution_tool.route_query_to_pois(
-                thread_state.metadata["address_slot"]["location"],  # 或用lat/lng周边搜索
+                thread_state.metadata["address_slot"]["location"],
                 radius=1000,
                 results_limit=8
             )
-            plans = []  # 适配AmapPoiResult结构
+            
             for poi in nearby_pois:
-                # 从AmapPoiResult.location解析lat/lng
                 try:
                     lng_str, lat_str = poi.location.split(',')
                     poi_lat = float(lat_str)
                     poi_lng = float(lng_str)
                 except (ValueError, AttributeError):
-                    # 如果解析失败，使用默认值
                     poi_lat = lat
                     poi_lng = lng
                 
-                plans.append({
+                initial_plans.append({
                     "merchant_name": poi.name,
                     "merchant_address": poi.address,
                     "lat": poi_lat,
@@ -340,12 +335,20 @@ class LangGraphAgent:
                     "distance": poi.distance if hasattr(poi, "distance") else None,
                     "rating": float(poi.rating) if poi.rating and poi.rating.replace('.', '').isdigit() else None,
                 })
-            # 写入方案契约
-            if not hasattr(detailed_scenario, "plans"):
-                detailed_scenario.plans = []
-            detailed_scenario.plans.extend(plans)
         
-        # 7. 实时信息检索（如果需要）
+        # Step 3: 对POI候选商家进行实时信息检索
+        enhanced_plans = await self._batch_real_time_info_retrieval(initial_plans, message)
+        
+        # Step 4: 基于实时检索结果生成详细方案
+        detailed_scenario = await self._generate_enhanced_detailed_scenario(
+            vibe_context, message, quest_narrative, enhanced_plans
+        )
+        
+        # 5. 批量实时信息检索结果写入方案
+        if enhanced_plans and hasattr(detailed_scenario, "plans"):
+            detailed_scenario.plans = enhanced_plans
+        
+        # 6. 实时补充检索（单商户深度信息，可选）
         updated_scenario = await self._real_time_info_retrieval(detailed_scenario, message)
         
         # 8. 预订需求评估
@@ -1117,8 +1120,146 @@ class LangGraphAgent:
                 "status": "cancelled",
                 "message": "用户取消了操作",
                 "next_actions": ["重新规划", "询问新需求"]
-            }
-    
+        }
+
+    async def _batch_real_time_info_retrieval(self, plans: List[Dict], user_message: str) -> List[Dict]:
+        """批量实时信息检索 - 对附近商家进行批量状态查询"""
+        if not plans or len(plans) == 0:
+            logger.info("跳过批量实时检索 - 无候选商家")
+            return plans
+        
+        # 延迟初始化Web搜索工具
+        if self.web_search_tool is None:
+            self.web_search_tool = WebSearchTool()
+        
+        enhanced_plans = []
+        
+        try:
+            for plan in plans:
+                try:
+                    merchant_name = plan.get("merchant_name", "")
+                    merchant_address = plan.get("merchant_address", "")
+                    
+                    if not merchant_name:
+                        logger.warning(f"跳过商家 - 无名称: {plan}")
+                        enhanced_plans.append(plan)
+                        continue
+                    
+                    logger.info(f"批量检索实时信息 - 商家: {merchant_name}")
+                    
+                    # 搜索商家营业状态
+                    status_query = SearchQuery(
+                        query=merchant_name,
+                        location=merchant_address,
+                        search_type="business_status"
+                    )
+                    
+                    try:
+                        business_info = await self.web_search_tool.search_business_info(status_query)
+                        
+                        # 如果实时检索成功，增强商家信息
+                        enhanced_plan = plan.copy()
+                        enhanced_plan["real_time_status"] = {
+                            "is_open": business_info.is_open,
+                            "current_status": business_info.current_status,
+                            "last_updated": datetime.utcnow().isoformat()
+                        }
+                        enhanced_plan["online_availability"] = business_info.is_open
+                        
+                        enhanced_plans.append(enhanced_plan)
+                        
+                    except Exception as retrieval_error:
+                        logger.warning(f"商家{merchant_name}实时检索失败: {retrieval_error}")
+                        # 实时检索失败，保留原计划
+                        plan["real_time_status"] = {
+                            "is_open": True,  # 默认假设开放
+                            "current_status": "unknown",
+                            "last_updated": datetime.utcnow().isoformat(),
+                            "error": "实时检索失败，使用默认状态"
+                        }
+                        enhanced_plans.append(plan)
+                        
+                except Exception as plan_error:
+                    logger.error(f"处理商家信息时出错: {plan_error}")
+                    # 出现错误也保留原计划
+                    enhanced_plans.append(plan)
+                    
+        except Exception as batch_error:
+            logger.error(f"批量实时检索整体失败: {batch_error}")
+            # 发生严重错误时返回原始计划
+            enhanced_plans = plans
+        
+        logger.info(f"批量实时检索完成 - 处理了{len(plans)}个商家，成功{len(enhanced_plans)}个")
+        return enhanced_plans
+
+    async def _generate_enhanced_detailed_scenario(self, 
+                                                vibe_context, 
+                                                user_message: str, 
+                                                quest_narrative, 
+                                                enhanced_plans: List[Dict] = None) -> Any:
+        """基于实时检索结果生成增强详细方案"""
+        # 根据心境选择合适的方案模式
+        mode_mapping = {
+            "healing": "healing",
+            "light": "healing", 
+            "deep": "exploration"
+        }
+        
+        scenario_mode = mode_mapping.get(vibe_context.mode.value, "healing")
+        
+        # 过滤出可用的商家（仅开放状态）
+        available_plans = []
+        if enhanced_plans:
+            available_plans = [plan for plan in enhanced_plans 
+                            if plan.get("real_time_status", {}).get("is_open", True) and 
+                            plan.get("real_time_status", {}).get("current_status") in ["open", "unknown"]]
+        
+        logger.info(f"可用商家数量: {len(available_plans)} / {len(enhanced_plans) if enhanced_plans else 0}")
+        
+        # 如果有可用的实时商家，使用这些商家信息增强方案
+        if available_plans:
+            # 选择最佳商家（评分高的、距离近的）
+            best_plan = self._select_best_merchant(available_plans)
+            
+            if best_plan and hasattr(self.scenario_generator, 'generate_with_plans'):
+                # 使用实时商家信息生成方案
+                detailed_scenario = self.scenario_generator.generate_with_plans(
+                    user_message, scenario_mode, 
+                    {
+                        "selected_merchant": best_plan,
+                        "alternative_merchants": available_plans[1:4] if len(available_plans) > 1 else []
+                    }
+                )
+                logger.info(f"使用实时商家生成方案 - 商家: {best_plan.get('merchant_name', '未知')}")
+            else:
+                # 降级到标准方案生成
+                detailed_scenario = self.scenario_generator.generate_complete_enhanced_scenario(
+                    user_message, scenario_mode
+                )
+                logger.info("降级到标准方案生成")
+        else:
+            # 没有可用商家时，使用标准方案生成
+            detailed_scenario = self.scenario_generator.generate_complete_enhanced_scenario(
+                user_message, scenario_mode
+            )
+            logger.info("无实时商家可用，使用标准方案生成")
+        
+        logger.info(f"增强详细方案生成完成 - 模式: {scenario_mode}")
+        return detailed_scenario
+        
+    def _select_best_merchant(self, available_plans: List[Dict]) -> Dict:
+        """选择最佳商家（评分最高，距离最近）"""
+        if not available_plans:
+            return None
+        
+        def score_plan(plan):
+            rating = plan.get("rating", 0) or 0
+            distance = plan.get("distance", 999) or 999
+            # 评分优先，距离次要
+            return (rating * 1000) - (distance / 10)
+        
+        return max(available_plans, key=score_plan)
+
     def get_agent_status(self) -> Dict[str, Any]:
         """获取代理状态信息"""
         return {

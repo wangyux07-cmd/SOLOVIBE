@@ -636,26 +636,49 @@ async def chat_endpoint(request: dict):
     try:
         logger.info(f"收到聊天请求: {request}")
 
-        messages = request.get("messages", [])
-        if not messages or not isinstance(messages, list) or len(messages) == 0:
-            logger.warning("消息数组为空或格式错误")
-            raise HTTPException(status_code=400, detail="messages 是必需的且必须是数组")
-
-        # 提取最新的用户消息
-        latest_message = messages[-1]
-        if latest_message.get("role") != "user":
-            # 找最后一个用户消息
-            latest_user_msg = None
-            for msg in reversed(messages):
-                if msg.get("role") == "user":
-                    latest_user_msg = msg
-                    break
-            if not latest_user_msg:
-                latest_user_msg = latest_message  # fallback
+        # Protocol v2.0兼容性处理 + thread_id获取
+        user_message = ""
+        
+        # 先获取thread_id，确保在所有情况下都能正确获取
+        thread_id = request.get("thread_id")  # body中的thread_id (新协议)
+        if not thread_id and hasattr(request, 'query_params'):
+            thread_id = request.query_params.get("thread_id")  # URL参数
+        if not thread_id and request.get("messages") and isinstance(request["messages"], list) and request["messages"]:
+            thread_id = request["messages"][-1].get("id")  # 消息中的id
+        logger.info(f"[Protocol-v2] 原始thread_id: {thread_id}")
+        
+        # 情况1: 新协议 (单个message字段)
+        if "message" in request:
+            user_message = request["message"]
+            logger.info("[Protocol-v2] 使用新格式: message字段")
+        
+        # 情况2: 旧协议 (messages数组)
+        elif "messages" in request:
+            messages = request["messages"]
+            if not messages or not isinstance(messages, list) or len(messages) == 0:
+                logger.warning("消息数组为空或格式错误")
+                raise HTTPException(status_code=400, detail="messages 是必需的且必须是数组")
+            
+            # 提取最新的用户消息
+            latest_message = messages[-1]
+            if latest_message.get("role") != "user":
+                # 找最后一个用户消息
+                latest_user_msg = None
+                for msg in reversed(messages):
+                    if msg.get("role") == "user":
+                        latest_user_msg = msg
+                        break
+                if not latest_user_msg:
+                    latest_user_msg = latest_message  # fallback
+            else:
+                latest_user_msg = latest_message
+            
+            user_message = latest_user_msg.get("content", "")
+            logger.info("[Backward Compatibility] 使用旧格式: messages字段")
+        
         else:
-            latest_user_msg = latest_message
-
-        user_message = latest_user_msg.get("content", "")
+            raise HTTPException(status_code=400, detail="请求必须包含message或messages字段")
+        
         if not user_message:
             raise HTTPException(status_code=400, detail="用户消息内容不能为空")
 
@@ -664,12 +687,19 @@ async def chat_endpoint(request: dict):
         if hasattr(request, 'client') and request.client:
             client_ip = request.client.host
             
-        # 优先使用前端传递的thread_id
-        thread_id = latest_user_msg.get("id")
+        # Protocol v2.0: thread_id优先级
+        # 1. body中的thread_id (新协议)
+        # 2. query_params中的thread_id (兼容性)
+        # 3. messages中消息的id (最旧版本)
+        thread_id = request.get("thread_id")  # 新协议body中
         
-        # 如果没有提供ID，则从查询参数获取
         if not thread_id and hasattr(request, 'query_params'):
-            thread_id = request.query_params.get("thread_id")
+            thread_id = request.query_params.get("thread_id")  # URL参数
+            
+        if not thread_id and "messages" in request and request["messages"]:
+            thread_id = request["messages"][-1].get("id")  # 旧版本
+            
+        logger.info(f"[Protocol-v2] thread_id来源: {thread_id or 'None'}")
         
         logger.info(f"处理用户消息: {user_message}, thread_id: {thread_id}, client_ip: {client_ip}")
 
@@ -705,13 +735,21 @@ async def chat_endpoint(request: dict):
             response_text = "抱歉，处理消息时遇到问题"
             # 协议v2: 错误时也保持thread_id一致性
             final_thread_id = stable_thread_id
+        
+        # Protocol v2.0: 根据地址处理结果生成state_info (Protocol v2.0 修复)
+        # 直接从process_result中读取地址状态，而不是依赖conversation_manager的状态缓存
+        has_location = address_result.get("address_exists", False) if 'address_result' in locals() else False
+        # 如果process_result显示已经有详细方案说明地址已存在
+        if not has_location and process_result.get("type") == "response":
+            has_location = True  # 能生成方案的说明地址已经存store
+        needs_user_input = process_result.get("type") == "clarification" and "address_query" in process_result
 
         return {
             "response": response_text, 
             "thread_id": final_thread_id,
             "state_info": {
-                "has_location": False,  # Phase 1: 简化状态信息
-                "needs_user_input": "location_request" in response_text
+                "has_location": has_location,
+                "needs_user_input": needs_user_input
             }
         }
 
