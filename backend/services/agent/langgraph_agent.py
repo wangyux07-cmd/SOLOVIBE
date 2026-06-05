@@ -67,18 +67,49 @@ class LangGraphAgent:
     核心功能：情感感知 → 心境分析 → 独享任务生成
     """
     
-    def __init__(self):
+    def __init__(self, supabase_client=None):
         self.checkpoint_data = {}
         self.emotion_memory = {}
-        self.scenario_generator = EnhancedScenarioGenerator()
-        self.web_search_tool = WebSearchTool()  # 已初始化，用于Tavily实时检索
-        self.booking_safety_gate = BookingSafetyGate()
-        self.booking_execution_tool = PlaywrightBookingExecutionTool()  # 🆕 初始化地理工具
         
-        # 初始化 Supabase 客户端用于检查点持久化
-        from db.supabase_client import SupabaseClient
-        self.supabase_client = SupabaseClient()
-        
+        # 初始化工具类，捕获可能的初始化错误
+        try:
+            from services.data.scenario_generator import EnhancedScenarioGenerator
+            self.scenario_generator = EnhancedScenarioGenerator()
+        except Exception as e:
+            logger.warning(f"EnhancedScenarioGenerator初始化失败，使用模拟模式: {e}")
+            self.scenario_generator = None
+            
+        try:
+            from services.tools.web_search_tool import WebSearchTool
+            self.web_search_tool = WebSearchTool()  # 已初始化，用于Tavily实时检索
+        except Exception as e:
+            logger.warning(f"WebSearchTool初始化失败，使用模拟模式: {e}")
+            self.web_search_tool = None
+            
+        try:
+            self.booking_safety_gate = BookingSafetyGate()
+        except Exception as e:
+            logger.warning(f"BookingSafetyGate初始化失败，使用模拟模式: {e}")
+            self.booking_safety_gate = None
+            
+        try:
+            from services.tools.booking_execution_tool import PlaywrightBookingExecutionTool
+            self.booking_execution_tool = PlaywrightBookingExecutionTool()  # 🆕 初始化地理工具
+        except Exception as e:
+            logger.warning(f"PlaywrightBookingExecutionTool初始化失败，使用模拟模式: {e}")
+            self.booking_execution_tool = None
+
+        # 使用传入的Supabase客户端或创建新的
+        if supabase_client:
+            self.supabase_client = supabase_client
+        else:
+            try:
+                from db.supabase_client import SupabaseClient
+                self.supabase_client = SupabaseClient()
+            except Exception as e:
+                logger.warning(f"SupabaseClient初始化失败，使用内存模式: {e}")
+                self.supabase_client = None
+
         logger.info("LangGraph Agent 初始化完成（慢生活轨道模式）")
 
     async def _intercept_and_store_address(self, message: str, thread_state: ThreadState) -> Dict[str, Any]:
@@ -116,10 +147,54 @@ class LangGraphAgent:
                 current_location = match.group(2) if len(match.groups()) > 1 else match.group(1)
                 break  # 找到一个就停止
         if not current_location:
-            # fallback：匹配2+个中文字连续串（如"三里屯"、"五道口")
-            fallback_match = re.search(r'([一-龥]{2,})', message)
-            if fallback_match:
-                current_location = fallback_match.group(1)
+            # 更严格的地址提取：只在包含明确地名关键词时才提取
+            location_keywords = [
+                '三里屯', '西单', '王府井', '后海', '五道口', '朝阳公园', '国贸', '建国门', '四惠', '望京',
+                '中关村', '天安门', '鼓楼', '南锣鼓巷', '簋街', '工体', '亚运村', '亦庄', '通州', '丰台',
+                '地铁', '站', '村', '街', '路', '道', '胡同', '巷', '里', '村', '镇', '乡', '区', '县'
+            ]
+            
+            # 检查消息中是否包含任何地理位置关键词
+            found_keywords = []
+            for keyword in location_keywords:
+                if keyword in message:
+                    found_keywords.append(keyword)
+                    break
+            
+            # 只有找到明确的地理位置关键词时才尝试提取
+            if found_keywords:
+                # 使用更精确的模式匹配实际的地点名称
+                for keyword in found_keywords:
+                    # 查找包含关键词的短语
+                    location_match = re.search(f'([^\\s，。！？]*{keyword}[^\\s，。！？]*)', message)
+                    if location_match:
+                        extracted_location = location_match.group(1)
+                        
+                        # 检查是否包含否定词汇
+                        negation_patterns = [
+                            f"(不|没|非|无)在.*{extracted_location}",
+                            f"{extracted_location}.*(不|没|非|无)在",
+                            f"(远离|避开|离开){extracted_location}",
+                            f"不.*去.*{extracted_location}",
+                            f"没.*去.*{extracted_location}"
+                        ]
+                        
+                        is_negated = False
+                        for pattern in negation_patterns:
+                            if re.search(pattern, message):
+                                is_negated = True
+                                logger.info(f"检测到否定表达：{message}，跳过位置'{extracted_location}'")
+                                break
+                        
+                        if not is_negated:
+                            current_location = extracted_location
+                            logger.info(f"提取到有效位置：{extracted_location}")
+                        else:
+                            logger.info(f"检测到否定表达，不提取位置：{extracted_location}")
+                        break
+            
+            if not current_location:
+                logger.info(f"未在消息中找到有效位置信息：{message}")
         
         # 若新位置存在且跟历史不一致，则覆盖
         if current_location and current_location != history_location:
@@ -130,8 +205,10 @@ class LangGraphAgent:
                 "updated_at": datetime.now().isoformat()
             }
             thread_state.metadata["address_slot"] = history_slot
+            logger.info(f"更新地址槽位: {current_location} (覆盖历史: {history_location})")
         
-        address_exists = bool(history_slot.get("location"))
+        # 重新读取更新后的地址槽位
+        address_exists = bool(thread_state.metadata.get("address_slot", {}).get("location"))
         if address_exists:
             return {
                 "address_exists": True,
@@ -174,10 +251,11 @@ class LangGraphAgent:
         # 2. 氛围强度评估
         vibe_context = await self._vibe_intensity_assessment(emotion_profile, thread_state)
         
-        # 🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕
-        # Step 1: 地址拦截
+        # Step 1: 从当前消息中提取地址并更新state
         address_result = await self._intercept_and_store_address(message, thread_state)
-        if not address_result["address_exists"]:
+        
+        # Step 2: 基于state中的持久化地址信息做决策
+        if not thread_state.metadata.get("address_slot", {}).get("location"):
             # 🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕
             # Step 5: 分支B: 温柔地问（保护隐私，只问地铁站或区域）
             return {
@@ -268,7 +346,27 @@ class LangGraphAgent:
         if detailed_scenario:
             try:
                 from dataclasses import asdict
-                serialized_scenario = asdict(detailed_scenario) if hasattr(detailed_scenario, '__dataclass_fields__') else str(detailed_scenario)
+                import json
+                
+                # 序列化为字典后进行JSON兼容性处理
+                scenario_dict = asdict(detailed_scenario) if hasattr(detailed_scenario, '__dataclass_fields__') else detailed_scenario
+                
+                # 深度转换以处理嵌套的枚举
+                def convert_enums(obj):
+                    if isinstance(obj, dict):
+                        return {k: convert_enums(v) for k, v in obj.items()}
+                    elif isinstance(obj, list):
+                        return [convert_enums(item) for item in obj]
+                    elif hasattr(obj, 'value'):  # 处理枚举
+                        return obj.value
+                    else:
+                        return obj
+                
+                scenario_dict = convert_enums(scenario_dict)
+                
+                # 测试JSON序列化
+                json.dumps(scenario_dict)
+                serialized_scenario = scenario_dict
             except Exception as e:
                 logger.warning(f"序列化详细方案失败: {e}，使用字符串表示")
                 serialized_scenario = str(detailed_scenario)
@@ -276,7 +374,22 @@ class LangGraphAgent:
         serialized_updated_scenario = None
         if updated_scenario:
             try:
-                serialized_updated_scenario = asdict(updated_scenario) if hasattr(updated_scenario, '__dataclass_fields__') else str(updated_scenario)
+                # 同样处理更新方案
+                updated_dict = asdict(updated_scenario) if hasattr(updated_scenario, '__dataclass_fields__') else updated_scenario
+                
+                def convert_enums(obj):
+                    if isinstance(obj, dict):
+                        return {k: convert_enums(v) for k, v in obj.items()}
+                    elif isinstance(obj, list):
+                        return [convert_enums(item) for item in obj]
+                    elif hasattr(obj, 'value'):  # 处理枚举
+                        return obj.value
+                    else:
+                        return obj
+                
+                updated_dict = convert_enums(updated_dict)
+                json.dumps(updated_dict)
+                serialized_updated_scenario = updated_dict
             except Exception as e:
                 logger.warning(f"序列化更新方案失败: {e}，使用字符串表示")
                 serialized_updated_scenario = str(updated_scenario)
@@ -569,23 +682,22 @@ class LangGraphAgent:
                                       detailed_scenario: Any,
                                       user_message: str) -> Dict[str, Any]:
         """实时信息检索节点 - 获取商家最新状态"""
-        if not hasattr(detailed_scenario, 'detailed_scenario'):
+        # 检查是否为有效的详细方案对象
+        if not hasattr(detailed_scenario, 'merchant'):
             logger.info("跳过实时信息检索 - 无详细方案数据")
-            return None
-        
-        scenario_data = detailed_scenario.detailed_scenario if hasattr(detailed_scenario, 'detailed_scenario') else detailed_scenario
+            return detailed_scenario
         
         # 延迟初始化Web搜索工具
         if self.web_search_tool is None:
             self.web_search_tool = WebSearchTool()
         
         try:
-            merchant_name = scenario_data.get('merchant_info', {}).get('name', '')
-            merchant_address = scenario_data.get('merchant_info', {}).get('address', '')
+            merchant_name = detailed_scenario.merchant.name
+            merchant_address = detailed_scenario.merchant.location.address
             
             if not merchant_name or not merchant_address:
                 logger.info("跳过实时信息检索 - 缺少商家信息")
-                return scenario_data
+                return detailed_scenario
             
             logger.info(f"开始检索实时信息 - 商家: {merchant_name}")
             
@@ -634,6 +746,10 @@ class LangGraphAgent:
                                          user_message: str) -> Optional[Dict[str, Any]]:
         """评估预订需求 - 判断是否需要执行预订"""
         # 获取商家和费用信息
+        if not detailed_scenario:
+            logger.info("预订评估：无详细方案数据，跳过预订评估")
+            return None
+        
         try:
             merchant_info = {
                 'name': detailed_scenario.merchant.name,

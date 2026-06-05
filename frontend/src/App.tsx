@@ -108,6 +108,7 @@ export default function App() {
   const [hasCheckedInToday, setHasCheckedInToday] = useState(false);
 
   // Chat/AI History States
+  const [currentThreadId, setCurrentThreadId] = useState<string | null>(null);
   const [chatMessages, setChatMessages] = useState<Message[]>([
     {
       id: "msg-1",
@@ -219,13 +220,19 @@ export default function App() {
         content: msg.content
       }));
 
-      const res = await fetch("http://localhost:8000/api/chat", {
+      const res = await fetch(`http://localhost:8000/api/chat${currentThreadId ? `?thread_id=${currentThreadId}` : ""}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ messages: chatPayload })
       });
 
       const data = await res.json();
+      
+      // 保存或更新thread_id以便对话连续性
+      if (data.thread_id && !currentThreadId) {
+        setCurrentThreadId(data.thread_id);
+      }
+      
       const modelMsg: Message = {
         id: `msg-${Date.now() + 1}`,
         role: "model",

@@ -1010,11 +1010,40 @@ class PlaywrightBookingExecutionTool:
                 "望京": {"lat": 39.9928, "lng": 116.4712},
             }
             
-            # 简单的匹配逻辑
+            # 检查是否是纯情感表达或没有具体地址的句子
+            emotional_patterns = [
+                r".*[骂|批|训|吵|哭|笑|累|烦|困|饿|渴|冷|热|好|坏].*",
+                r"^[^\\s，。！？]{1,4}$"  # 太短的句子很可能是情感词
+            ]
+            
+            import re
+            for pattern in emotional_patterns:
+                if re.search(pattern, query):
+                    logger.info(f"检测到情感表达，不进行地理编码：{query}")
+                    return None
+            
+            # 更严格的匹配逻辑：需要完整包含地理位置关键词
             for key, coords in mock_coordinates.items():
                 if key in query:
-                    logger.info(f"获取位置成功: {query} -> {coords}")
-                    return coords
+                    # 检查是否是负面表达
+                    negation_patterns = [
+                        f"(不|没|非|无)在.*{key}",
+                        f"{key}.*(不|没|非|无)在",
+                        f"(远离|避开|离开){key}",
+                        f"不.*去.*{key}",
+                        f"没.*去.*{key}"
+                    ]
+                    
+                    is_negated = False
+                    for pattern in negation_patterns:
+                        if re.search(pattern, query):
+                            is_negated = True
+                            logger.info(f"检测到否定表达，跳过位置匹配：{query}")
+                            break
+                    
+                    if not is_negated:
+                        logger.info(f"获取位置成功: {query} -> {coords}")
+                        return coords
             
             # 默认位置（北京中心）
             default_coords = {"lat": 39.9042, "lng": 116.4074}

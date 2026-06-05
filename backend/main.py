@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 from datetime import datetime
 from typing import AsyncGenerator, Dict, Any
 from fastapi.responses import StreamingResponse
+import uuid
 import uvicorn
 
 from data_types import (
@@ -36,6 +37,7 @@ from data_types import (
 )
 from db.supabase_client import SupabaseClient
 from services.agent.langgraph_agent import LangGraphAgent
+from services.conversation.manager import ConversationManager
 from middleware.risk_control import verify_action_risk
 
 # DeepSeek LLM 集成
@@ -620,43 +622,49 @@ async def chat_endpoint(request: dict):
         if not user_message:
             raise HTTPException(status_code=400, detail="用户消息内容不能为空")
 
-        # 生成 thread_id
-        import uuid
-        thread_id = latest_user_msg.get("id", str(uuid.uuid4()))
-
-        logger.info(f"处理用户消息: {user_message}, thread_id: {thread_id}")
-        logger.info("正在初始化流式处理handler...")
-
-        # 使用现有的流式处理 handler（它内置情绪分析和POI搜索）
-        try:
-            # 收集完整响应 - 但添加超时限制
-            import asyncio
-            complete_response = ""
+        # 使用ConversationManager管理对话
+        client_ip = None
+        if hasattr(request, 'client') and request.client:
+            client_ip = request.client.host
             
-            # 使用异步任务来处理流式响应
-            async def collect_stream():
-                chunks = []
-                async for chunk in deepseek_stream_chat_handler(user_message, thread_id):
-                    chunks.append(chunk)
-                    # 累计到一定长度就停止，避免无限等待
-                    if len(''.join(chunks)) > 2000:  # 约2000字符限制
-                        break
-                return ''.join(chunks)
-            
-            # 设置15秒超时来收集响应
-            complete_response = await asyncio.wait_for(collect_stream(), timeout=15.0)
-            
-        except asyncio.TimeoutError:
-            logger.warning(f"流式处理超时 - thread_id: {thread_id}")
-            complete_response = "处理超时，请稍后再试"
-        except Exception as e:
-            logger.error(f"流式处理错误: {e}")
-            complete_response = "抱歉，处理消息时遇到问题"
+        # 优先使用前端传递的thread_id
+        thread_id = latest_user_msg.get("id")
         
-        if not complete_response:
-            complete_response = "抱歉，我无法生成回复。"
+        # 如果没有提供ID，则从查询参数获取
+        if not thread_id and hasattr(request, 'query_params'):
+            thread_id = request.query_params.get("thread_id")
+        
+        logger.info(f"处理用户消息: {user_message}, thread_id: {thread_id}, client_ip: {client_ip}")
 
-        return {"response": complete_response}
+        try:
+            # 使用ConversationManager处理完整流程
+            conversation_manager = ConversationManager(supabase_client=supabase_client)
+            
+            # 获取或创建稳定的thread_id
+            stable_thread_id = await conversation_manager.get_or_create_thread(
+                thread_id=thread_id,
+                client_ip=client_ip
+            )
+            
+            # 处理消息
+            process_result, final_thread_id = await conversation_manager.process_message(
+                message=user_message,
+                thread_id=stable_thread_id,
+                client_ip=client_ip
+            )
+            
+            # 生成返回响应
+            if process_result.get("type") == "clarification":
+                response_text = process_result["empathy_response"]
+            else:
+                response_text = process_result.get("empathy_response", "抱歉，我无法生成回复。")
+                
+        except Exception as e:
+            logger.error(f"对话处理错误: {e}")
+            response_text = "抱歉，处理消息时遇到问题"
+            final_thread_id = thread_id or str(uuid.uuid4())
+
+        return {"response": response_text, "thread_id": final_thread_id}
 
     except Exception as e:
         logger.error(f"聊天处理错误: {str(e)}")
