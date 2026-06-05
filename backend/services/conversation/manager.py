@@ -143,10 +143,11 @@ class ConversationManager:
         
         返回: (处理结果, thread_id)
         """
-        logger.info(f"开始处理消息: '{message}' | thread_id: {thread_id}")
+        logger.info(f"[Protocol-v2] 开始处理: '{message}' | thread_id: {thread_id}")
         
         # Step 1: 加载线程状态
         thread_state = await self.load_thread_state(thread_id)
+        logger.info(f"[Protocol-v2] 状态加载完成 | 地址: {thread_state.metadata.get('address_slot', {}).get('location', '无')}")
         
         # Step 2: 将消息添加到对话历史
         thread_state.messages.append({

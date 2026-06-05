@@ -416,8 +416,8 @@ def generate_booking_confirmation_message(booking_info: Dict) -> str:
 
 async def deepseek_stream_chat_handler(message: str, thread_id: str) -> AsyncGenerator[str, None]:
     """
-    Protocol v2.0 - 事件驱动SSE聊天处理器
-    将AI输出转换为结构化事件流：empathy, location_request, business_recommendation等
+    基于DeepSeek LLM的纯净流式聊天处理器
+    情感感知 → 洗掉复杂格式 → 直接流出纯文本字块
     """
     try:
         logger.info(f"开始处理thread_id: {thread_id}, message: {message}")
@@ -446,25 +446,12 @@ async def deepseek_stream_chat_handler(message: str, thread_id: str) -> AsyncGen
             process_result = await langgraph_agent.process_message(message, thread_state)
             
             # 判断返回类型
-            # Phase 3: 转换为Protocol v2.0事件驱动SSE流
             if process_result.get("type") == "clarification":
-                # 发送empathy事件
-                empathy_text = process_result.get("empathy_response", "亲爱的，你在哪里呢？我帮你看看附近有什么好去处～")
-                empathy_event = f"event: empathy\ndata: {json.dumps({'text': empathy_text}, ensure_ascii=False)}\n\n"
-                yield empathy_event
+                # 需要进一步澄清，比如问地址
+                empathy_text = process_result.get("empathy_response", "亲爱的，你在哪里呢？我帮你看看附近有什么好去处～")              
                 complete_response = empathy_text
-                
-                # 检查是否包含地址询问意图
-                if "地址查询" in process_result.get("tags", []) or "location" in empathy_text or "地铁" in empathy_text or "区域" in empathy_text:
-                    location_event = f"event: location_request\ndata: {json.dumps({'prompt': empathy_text, 'required': True}, ensure_ascii=False)}\n\n"
-                    yield location_event
+                yield empathy_text
             else:
-                # 发送情绪事件
-                if "empathy_response" in process_result:
-                    empathy_text = process_result["empathy_response"]
-                    empathy_event = f"event: empathy\ndata: {json.dumps({'text': empathy_text}, ensure_ascii=False)}\n\n"
-                    yield empathy_event
-                    complete_response = empathy_text
                 # 🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕
                 # 走新流程：从 LangGraph 里拿到详细场景、再让 DeepSeek 润色输出
                 detailed_scenario = process_result.get("detailed_scenario")
@@ -473,43 +460,21 @@ async def deepseek_stream_chat_handler(message: str, thread_id: str) -> AsyncGen
                     enhanced_text = detailed_scenario["enhanced_response"]
                     # 让 LLM 再加工一下，加入情绪
                     prompt = f"以下是场景内容，请用治愈语气润色成150字以内的回应：\n{enhanced_text}\n\n用户状态：压力={emotion_context.get('pressure_level', 5)}, 能量={emotion_context.get('energy_level', 5)}"
-                    # 事件驱动输出商业推荐
-                    final_text = ""  # 用于收集最终文本
                     async for chunk in deepseek_manager.generate_stream_response(prompt, emotion_context):
                         if chunk.startswith('data: '):
                             text_content = chunk[6:].strip().rstrip('\n')
                             if text_content:
                                 complete_response += text_content
-                                final_text += text_content
-                                # 发送文本chunk
-                                chunk_event = f"event: text_chunk\ndata: {json.dumps({'content': text_content}, ensure_ascii=False)}\n\n"
-                                yield chunk_event
-                    
-                    # 发送完整的empathy事件
-                    if final_text:
-                        empathy_event = f"event: empathy\ndata: {json.dumps({'text': final_text}, ensure_ascii=False)}\n\n"
-                        # 检查是否有店家信息需要推荐
-                        detailed_scenario = process_result.get("detailed_scenario")
-                        if detailed_scenario and "merchant" in detailed_scenario:
-                            merchant = detailed_scenario["merchant"]
-                            recommendation_event = f"event: business_recommendation\ndata: {json.dumps({
-                                'name': merchant.name if hasattr(merchant, 'name') else str(merchant), 
-                                'address': merchant.location.address if hasattr(merchant, 'location') else '',
-                                'description': final_text[:100]
-                            }, ensure_ascii=False)}\n\n"
-                            yield recommendation_event
+                                yield text_content
                 else:
                     # 降级到纯 LLM 润色
                     fallback_input = f"""参考上下文: {json.dumps(process_result, ensure_ascii=False)} \n请给用户一个治愈的150字以内回应:"""
-                    # 降级情况的流式事件输出
                     async for chunk in deepseek_manager.generate_stream_response(fallback_input, emotion_context):
                         if chunk.startswith('data: '):
                             text_content = chunk[6:].strip().rstrip('\n')
                             if text_content:
                                 complete_response += text_content
-                                # Fallback也使用事件
-                                chunk_event = f"event: text_chunk\ndata: {json.dumps({'content': text_content}, ensure_ascii=False)}\n\n"
-                                yield chunk_event
+                                yield text_content
         except Exception as e:
             import traceback
             logger.error(f"LangGraph流程执行失败: {str(e)}")
@@ -520,9 +485,7 @@ async def deepseek_stream_chat_handler(message: str, thread_id: str) -> AsyncGen
                     text_content = chunk[6:].strip().rstrip('\n')
                     if text_content:
                         complete_response += text_content
-                        # 异常时也使用事件
-                        chunk_event = f"event: error_fallback\ndata: {json.dumps({'content': text_content}, ensure_ascii=False)}\n\n"
-                        yield chunk_event
+                        yield text_content
         
         # 4. 默默在后台将对话安全地保存到 Supabase 数据库中
         try:
@@ -677,22 +640,20 @@ async def chat_endpoint(request: dict):
             # 使用ConversationManager处理完整流程
             conversation_manager = ConversationManager(supabase_client=supabase_client)
             
-            # Phase 1: Thread重用基础逻辑 (API_PROTOCOL v2.0)
-            # 规则1: 优先重用现有的thread_id
-            # 规则2: 仅当绝对必要时才创建新thread
-            stable_thread_id = thread_id
-            if not stable_thread_id:
-                stable_thread_id = str(uuid.uuid4())
-                logger.info(f"[Protocol-v2] 创建新thread: {stable_thread_id}")
-            else:
-                logger.info(f"[Protocol-v2] 重用现有thread: {stable_thread_id}")
+            # 获取或创建稳定的thread_id
+            stable_thread_id = await conversation_manager.get_or_create_thread(
+                thread_id=thread_id,
+                client_ip=client_ip
+            )
+            logger.info(f"[Thread追踪] 输入: {thread_id} → 稳定化: {stable_thread_id}")
             
             # 处理消息
             process_result, final_thread_id = await conversation_manager.process_message(
                 message=user_message,
-                thread_id=stable_thread_id
+                thread_id=stable_thread_id,
+                client_ip=client_ip
             )
-            logger.info(f"[Protocol-v2] 处理完成: 输入={stable_thread_id} → 输出={final_thread_id}")
+            logger.info(f"[Thread追踪] 处理完成: {stable_thread_id} → 输出: {final_thread_id}")
             
             # 生成返回响应
             if process_result.get("type") == "clarification":
@@ -703,17 +664,9 @@ async def chat_endpoint(request: dict):
         except Exception as e:
             logger.error(f"对话处理错误: {e}")
             response_text = "抱歉，处理消息时遇到问题"
-            # 协议v2: 错误时也保持thread_id一致性
-            final_thread_id = stable_thread_id
+            final_thread_id = thread_id or str(uuid.uuid4())
 
-        return {
-            "response": response_text, 
-            "thread_id": final_thread_id,
-            "state_info": {
-                "has_location": False,  # Phase 1: 简化状态信息
-                "needs_user_input": "location_request" in response_text
-            }
-        }
+        return {"response": response_text, "thread_id": final_thread_id}
 
     except Exception as e:
         logger.error(f"聊天处理错误: {str(e)}")

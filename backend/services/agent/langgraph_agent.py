@@ -218,13 +218,27 @@ class LangGraphAgent:
                 "ai_ask_location_sentence": None
             }
         
-        # 若地址槽位为空，温柔生成询问语句（分支B）
+        # 若地址槽位为空，根据用户情绪生成询问语句（分支B - 协议v2优化）
+        # 先共情再询问，让用户感到关怀而非机械
+        empathy_prefix = "能理解你现在的感受"
+        if any(word in message for word in ["不好", "难受", "压抑", "沮丧", "不开心", "郁闷"]):
+            empathy_prefix = "看到你现在心情不太好，我很关心你"
+        elif any(word in message for word in ["累", "疲劳", "疲惫"]):
+            empathy_prefix = "感到疲惫的时候确实需要找个安静的地方休息"
+        
+        location_questions = [
+            f"{empathy_prefix}，你在哪个区域呢？我帮你找找附近有什么治愈的好地方～",
+            f"{empathy_prefix}，能告诉我你在哪个地铁站附近吗？我来为你寻找合适的去处～",
+            f"{empathy_prefix}，你现在在哪个区域？我查查附近有什么适合放松的地方呢～",
+            f"不论你现在在哪里，{empathy_prefix}。告诉我你的位置，我来为你找找好去处～"
+        ]
+        
         return {
             "address_exists": False,
             "address_value": None,
             "lat": None,
             "lng": None,
-            "ai_ask_location_sentence": random.choice(LOCATION_ASK_SENTENCES)
+            "ai_ask_location_sentence": random.choice(location_questions)
         }
     
     async def process_message(self, message: str, thread_state: ThreadState) -> Dict[str, Any]:

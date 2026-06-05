@@ -2,7 +2,7 @@ import { useState, useRef, useEffect } from "react";
 import {
   motion,
   AnimatePresence
-} from "motion/react";
+} from "framer-motion";
 import {
   Compass,
   Map as MapIcon,
@@ -220,17 +220,37 @@ export default function App() {
         content: msg.content
       }));
 
-      const res = await fetch(`http://localhost:8000/api/chat${currentThreadId ? `?thread_id=${currentThreadId}` : ""}`, {
+      // Protocol v2.0 - 遵循新API规范
+      const requestBody = {
+        message: userMsg.content, // 新协议要求单个message字段
+        ...(currentThreadId && { thread_id: currentThreadId }) // body中传递thread_id
+      };
+      
+      const res = await fetch(`http://localhost:8000/api/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages: chatPayload })
+        body: JSON.stringify(requestBody)
       });
 
       const data = await res.json();
       
-      // 保存或更新thread_id以便对话连续性
-      if (data.thread_id && !currentThreadId) {
+      // Protocol v2.0 - 处理新返回格式
+      // 始终使用返回的thread_id确保连续性
+      if (data.thread_id) {
         setCurrentThreadId(data.thread_id);
+        console.log(`[Protocol-v2] Thread ID 更新: ${data.thread_id}`);
+      }
+      
+      // 新state_info日志（用于调试）
+      if (data.state_info) {
+        console.log(`[Protocol-v2] 状态信息:`, data.state_info);
+        
+        // 根据state决定是否显示位置提示
+        if (data.state_info.has_location) {
+          console.log("✅ 地址已设置");
+        } else if (data.state_info.needs_user_input) {
+          console.log("📍 需要用户提供地址");
+        }
       }
       
       const modelMsg: Message = {
