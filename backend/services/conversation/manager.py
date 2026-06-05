@@ -171,8 +171,8 @@ class ConversationManager:
             # Step 5: 保存更新后的状态
             await self.save_thread_state(thread_state)
             
-            logger.info(f"消息处理完成 | thread_id: {thread_id}")
-            return process_result, thread_id
+            logger.info(f"消息处理完成 | 输入thread_id: {thread_id} | 状态thread_id: {thread_state.thread_id}")
+            return process_result, thread_state.thread_id
             
         except Exception as e:
             logger.error(f"消息处理失败: {e}", exc_info=True)  # 添加完整堆栈信息
