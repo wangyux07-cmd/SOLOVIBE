@@ -1071,24 +1071,25 @@ class PlaywrightBookingExecutionTool:
     async def _call_amap_geocoding(self, query: str) -> Optional[Dict[str, float]]:
         """调用高德地理编码API"""
         try:
-            amap_key = os.getenv('AMAP_API_KEY')
-            amap_base_url = os.getenv('AMAP_BASE_URL', 'https://restapi.amap.com/v3')
+            # 每次都重新读取环境变量，避免初始化时机问题
+            amap_key = os.getenv('AMAP_API_KEY') or self.amap_key
+            amap_base_url = os.getenv('AMAP_BASE_URL', 'https://restapi.amap.com')
             
             if not amap_key or amap_key.startswith('your-'):
                 logger.debug("AMAP_API_KEY未配置，跳过API调用")
                 return None
             
             async with aiohttp.ClientSession() as session:
-                # 高德地理编码API
-                geocoding_url = f"{amap_base_url}/geocode/geo"
+                # 高德地理编码API - 修正URL构建
+                geocoding_url = f"{amap_base_url}/v3/geocode/geo"
                 params = {
                     'key': amap_key,
                     'address': query,
                     'city': ''  # 不限制城市，让API自动判断
                 }
                 
-                logger.debug(f"调用高德地理编码API: {query}")
-                async with session.get(geocoding_url, params=params, timeout=10) as response:
+                logger.debug(f"调用高德地理编码API: {query} -> {geocoding_url}")
+                async with session.get(geocoding_url, params=params, timeout=15) as response:
                     if response.status == 200:
                         data = await response.json()
                         

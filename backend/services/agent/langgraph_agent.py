@@ -1279,6 +1279,12 @@ class LangGraphAgent:
                 scenario_type: str = "no_real_time_data"
                 user_location: str = ""
                 failure_reason: str = ""
+                scenario_id: str = "no_real_time_scenario"
+                
+                # 添加merchant属性以便main.py能正确识别
+                @property
+                def merchant(self):
+                    return None
                 
                 # 添加enhanced_response属性以触发LLM处理
                 @property 

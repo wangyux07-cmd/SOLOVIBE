@@ -140,7 +140,9 @@ class WebSearchTool:
         try:
             params = self._build_tavily_query(search_query)
             
-            async with self.session.post(self.tavily_base_url, json=params, timeout=10) as response:
+            # 从环境变量获取超时设置，默认15秒
+            timeout_seconds = int(os.getenv('WEB_SEARCH_TIMEOUT', '15'))
+            async with self.session.post(self.tavily_base_url, json=params, timeout=timeout_seconds) as response:
                 if response.status == 200:
                     data = await response.json()
                     return self._parse_tavily_response(data, search_query)
@@ -169,11 +171,13 @@ class WebSearchTool:
             
             params = self._build_serper_query(search_query)
             
+            # 使用相同的超时设置
+            timeout_seconds = int(os.getenv('WEB_SEARCH_TIMEOUT', '15'))
             async with self.session.post(
                 self.serper_base_url, 
                 json=params, 
                 headers=headers, 
-                timeout=10
+                timeout=timeout_seconds
             ) as response:
                 if response.status == 200:
                     data = await response.json()
@@ -204,6 +208,12 @@ class WebSearchTool:
                 current_status = keyword
                 break
         
+        # 从文本中提取评分信息
+        rating = self._extract_rating_from_text(answer, results)
+        
+        # 从文本中提取评价数量
+        review_count = self._extract_review_count_from_text(answer, results)
+        
         # 处理紧急通知
         emergency_info = []
         if "emergency" == search_query.search_type:
@@ -215,6 +225,8 @@ class WebSearchTool:
             is_open=is_open,
             current_status=current_status,
             last_updated=datetime.now().isoformat(),
+            rating=rating,
+            review_count=review_count,
             recent_reviews=self._extract_reviews(results),
             emergency_notices=emergency_info if emergency_info else None
         )
@@ -283,6 +295,66 @@ class WebSearchTool:
                 "source": result.get("url", "")
             })
         return reviews
+    
+    def _extract_rating_from_text(self, answer: str, results: List[Dict]) -> Optional[float]:
+        """从文本中提取评分信息"""
+        import re
+        
+        # 搜索所有文本中的评分模式
+        all_text = answer + " "
+        for result in results:
+            all_text += result.get("content", "") + " "
+        
+        # 常见的评分模式
+        rating_patterns = [
+            r'(\d+(\.\d+)?)分',      # 4.5分, 4分
+            r'评分[：:]?\s*(\d+(\.\d+)?)',  # 评分: 4.5, 评分：4.5
+            r'(\d+(\.\d+)?)/5',      # 4.5/5
+            r'[⭐\*★](\d+(\.\d+)?)', # ⭐4.5, ★4.5
+            r'(\d+(\.\d+)?)\s*星',   # 4.5星
+        ]
+        
+        for pattern in rating_patterns:
+            match = re.search(pattern, all_text)
+            if match:
+                try:
+                    rating = float(match.group(1))
+                    # 确保评分在合理范围内(0-5)
+                    if 0 <= rating <= 5:
+                        return rating
+                except ValueError:
+                    continue
+        
+        return None
+    
+    def _extract_review_count_from_text(self, answer: str, results: List[Dict]) -> Optional[int]:
+        """从文本中提取评价数量"""
+        import re
+        
+        # 搜索所有文本中的评价数量模式
+        all_text = answer + " "
+        for result in results:
+            all_text += result.get("content", "") + " "
+        
+        # 常见的评价数量模式
+        count_patterns = [
+            r'(\d+)[条个]评价',        # 10条评价, 20个评价
+            r'评价数[：:]?\s*(\d+)',    # 评价数: 10
+            r'(\d+)\s*条评论',        # 10条评论
+            r'评论[：:]?\s*(\d+)',     # 评论: 10
+            r'(\d+)\s*条用户评价',     # 10条用户评价
+        ]
+        
+        for pattern in count_patterns:
+            match = re.search(pattern, all_text)
+            if match:
+                try:
+                    count = int(match.group(1))
+                    return count
+                except ValueError:
+                    continue
+        
+        return None
     
     async def _search_cache_fallback(self, search_query: SearchQuery) -> BusinessInfo:
         """缓存降级搜索"""

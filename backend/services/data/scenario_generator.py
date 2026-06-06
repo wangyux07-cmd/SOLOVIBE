@@ -1022,9 +1022,27 @@ class EnhancedScenarioGenerator:
         
         return suggestions.get(merchant.type, "用镜头记录下此刻的美好")
     
-    def convert_to_api_format(self, scenario: CompleteScenario) -> Dict[str, Any]:
-        """转换为API输出格式"""
-        return {
+    def convert_to_api_format(self, scenario: Union[CompleteScenario, Any]) -> Dict[str, Any]:
+        """转换为API输出格式 - 支持处理NoRealTimeDataScenario特殊情况"""
+        
+        # 处理特殊情况：NoRealTimeDataScenario
+        if hasattr(scenario, 'scenario_type') and getattr(scenario, 'scenario_type', '') == 'no_real_time_data':
+            return {
+                "scenario_id": getattr(scenario, 'scenario_id', 'no_real_time_scenario'),
+                "title": f"实时数据获取失败 - {getattr(scenario, 'user_location', '未知位置')}",
+                "error_info": {
+                    "type": "no_real_time_data",
+                    "user_location": getattr(scenario, 'user_location', ''),
+                    "failure_reason": getattr(scenario, 'failure_reason', ''),
+                    "enhanced_response": getattr(scenario, 'enhanced_response', '') if hasattr(scenario, 'enhanced_response') else ''
+                },
+                "data_source": "error_fallback",
+                "generated_at": datetime.now().isoformat()
+            }
+        
+        # 正常的CompleteScenario处理
+        if hasattr(scenario, 'scenario_id') and hasattr(scenario, 'title'):
+            return {
             "scenario_id": scenario.scenario_id,
             "title": scenario.title,
             "merchant_info": {

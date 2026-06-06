@@ -10,7 +10,16 @@ import uvicorn
 
 # 🔌 Load .env 环境变量
 from dotenv import load_dotenv
-dotenv_loaded = load_dotenv()
+import os
+
+# 尝试从当前目录和backend目录加载.env文件
+backend_env_path = os.path.join(os.path.dirname(__file__), '.env')
+if os.path.exists(backend_env_path):
+    dotenv_loaded = load_dotenv(backend_env_path)
+    print(f"从 {backend_env_path} 加载环境变量")
+else:
+    dotenv_loaded = load_dotenv()
+    print("从默认位置加载环境变量")
 
 # 检查是否读到了 KEY
 deepseek_key = os.getenv('DEEPSEEK_API_KEY')
@@ -459,57 +468,69 @@ async def deepseek_stream_chat_handler(message: str, thread_id: str) -> AsyncGen
                     location_event = f"event: location_request\ndata: {json.dumps({'prompt': empathy_text, 'required': True}, ensure_ascii=False)}\n\n"
                     yield location_event
             else:
-                # 发送情绪事件
-                if "empathy_response" in process_result:
-                    empathy_text = process_result["empathy_response"]
-                    empathy_event = f"event: empathy\ndata: {json.dumps({'text': empathy_text}, ensure_ascii=False)}\n\n"
-                    yield empathy_event
-                    complete_response = empathy_text
                 # 🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕
                 # 走新流程：从 LangGraph 里拿到详细场景、再让 DeepSeek 润色输出
-            detailed_scenario = process_result.get("detailed_scenario")
-            if detailed_scenario and hasattr(detailed_scenario, "enhanced_response"):
-                # 🎯 即使有详细方案，也让 LLM 润色后再流式输出
-                enhanced_text = getattr(detailed_scenario, "enhanced_response", None)
-                # 让 LLM 再加工一下，加入情绪
-                prompt = f"以下是场景内容，请用治愈语气润色成150字以内的回应：\n{enhanced_text}\n\n用户状态：压力={emotion_context.get('pressure_level', 5)}, 能量={emotion_context.get('energy_level', 5)}"
-                # 事件驱动输出商业推荐
-                final_text = ""  # 用于收集最终文本
-                async for chunk in deepseek_manager.generate_stream_response(prompt, emotion_context):
-                    if chunk.startswith('data: '):
-                        text_content = chunk[6:].strip().rstrip('\n')
-                        if text_content:
-                            complete_response += text_content
-                            final_text += text_content
-                            # 发送文本chunk
-                            chunk_event = f"event: text_chunk\ndata: {json.dumps({'content': text_content}, ensure_ascii=False)}\n\n"
-                            yield chunk_event
+                detailed_scenario = process_result.get("detailed_scenario")
+                if detailed_scenario and hasattr(detailed_scenario, "enhanced_response"):
+                    # 🎯 即使有详细方案，也让 LLM 润色后再流式输出
+                    enhanced_text = getattr(detailed_scenario, "enhanced_response", None)
+                    # 让 LLM 再加工一下，加入情绪
+                    prompt = f"以下是场景内容，请用治愈语气润色成150字以内的回应：\n{enhanced_text}\n\n用户状态：压力={emotion_context.get('pressure_level', 5)}, 能量={emotion_context.get('energy_level', 5)}"
+                    # 事件驱动输出商业推荐
+                    final_text = ""  # 用于收集最终文本
+                    async for chunk in deepseek_manager.generate_stream_response(prompt, emotion_context):
+                        if chunk.startswith('data: '):
+                            text_content = chunk[6:].strip().rstrip('\n')
+                            if text_content:
+                                complete_response += text_content
+                                final_text += text_content
+                                # 发送文本chunk
+                                chunk_event = f"event: text_chunk\ndata: {json.dumps({'content': text_content}, ensure_ascii=False)}\n\n"
+                                yield chunk_event
+                    
+                    # 发送完整的empathy事件
+                    if final_text:
+                        empathy_event = f"event: empathy\ndata: {json.dumps({'text': final_text}, ensure_ascii=False)}\n\n"
+                        yield empathy_event
+                elif isinstance(detailed_scenario, dict) and detailed_scenario.get('error_info', {}).get('enhanced_response'):
+                    # 🎯 处理字典格式的NoRealTimeDataScenario
+                    enhanced_text = detailed_scenario['error_info']['enhanced_response']
+                    # 直接使用enhanced_response而不是empathy_response
+                    prompt = f"以下是场景内容，请用治愈语气润色成150字以内的回应：\n{enhanced_text}\n\n用户状态：压力={emotion_context.get('pressure_level', 5)}, 能量={emotion_context.get('energy_level', 5)}"
+                    # 事件驱动输出商业推荐
+                    final_text = ""  # 用于收集最终文本
+                    async for chunk in deepseek_manager.generate_stream_response(prompt, emotion_context):
+                        if chunk.startswith('data: '):
+                            text_content = chunk[6:].strip().rstrip('\n')
+                            if text_content:
+                                complete_response += text_content
+                                final_text += text_content
+                                # 发送文本chunk
+                                chunk_event = f"event: text_chunk\ndata: {json.dumps({'content': text_content}, ensure_ascii=False)}\n\n"
+                                yield chunk_event
+                    
+                    # 发送完整的empathy事件
+                    if final_text:
+                        empathy_event = f"event: empathy\ndata: {json.dumps({'text': final_text}, ensure_ascii=False)}\n\n"
+                        yield empathy_event
+                else:
+                    # 没有详细方案，回退到发送empathy_response
+                    if "empathy_response" in process_result:
+                        empathy_text = process_result["empathy_response"]
+                        empathy_event = f"event: empathy\ndata: {json.dumps({'text': empathy_text}, ensure_ascii=False)}\n\n"
+                        yield empathy_event
+                        complete_response = empathy_text
                 
-                # 发送完整的empathy事件
-                if final_text:
-                    empathy_event = f"event: empathy\ndata: {json.dumps({'text': final_text}, ensure_ascii=False)}\n\n"
-            # 检查是否有店家信息需要推荐
-            detailed_scenario = process_result.get("detailed_scenario")
-            if detailed_scenario and hasattr(detailed_scenario, "merchant"):
-                merchant = getattr(detailed_scenario, "merchant", None)
-                recommendation_event = f"event: business_recommendation\ndata: {json.dumps({
-                    'name': merchant.name if hasattr(merchant, 'name') else str(merchant), 
-                    'address': merchant.location.address if hasattr(merchant, 'location') else '',
-                    'description': final_text[:100]
-                }, ensure_ascii=False)}\n\n"
-                yield recommendation_event
-            else:
-                # 降级到纯 LLM 润色
-                fallback_input = f"""参考上下文: {json.dumps(process_result, ensure_ascii=False)} \n请给用户一个治愈的150字以内回应:"""
-                # 降级情况的流式事件输出
-                async for chunk in deepseek_manager.generate_stream_response(fallback_input, emotion_context):
-                    if chunk.startswith('data: '):
-                        text_content = chunk[6:].strip().rstrip('\n')
-                        if text_content:
-                            complete_response += text_content
-                            # Fallback也使用事件
-                            chunk_event = f"event: text_chunk\ndata: {json.dumps({'content': text_content}, ensure_ascii=False)}\n\n"
-                            yield chunk_event
+                # 检查是否有店家信息需要推荐
+                if detailed_scenario and hasattr(detailed_scenario, "merchant"):
+                    merchant = getattr(detailed_scenario, "merchant", None)
+                    if merchant:
+                        recommendation_event = f"event: business_recommendation\ndata: {json.dumps({
+                            'name': merchant.name if hasattr(merchant, 'name') else str(merchant), 
+                            'address': merchant.location.address if hasattr(merchant, 'location') else '',
+                            'description': final_text[:100] if 'final_text' in locals() else empathy_text[:100] if 'empathy_text' in locals() else ''
+                        }, ensure_ascii=False)}\n\n"
+                        yield recommendation_event
         except Exception as e:
             import traceback
             logger.error(f"LangGraph流程执行失败: {str(e)}")
@@ -736,6 +757,12 @@ async def chat_endpoint(request: dict):
                     merchant_obj = getattr(detailed_scenario, 'merchant')
                     merchant_name = getattr(merchant_obj, 'name', '推荐商家')
                     response_text = f"{process_result.get('empathy_response', '')} 我为你找到了{merchant_name}，这是一个很棒的去处！"
+                elif detailed_scenario and hasattr(detailed_scenario, 'enhanced_response'):
+                    # 处理没有实时数据但有enhanced_response的情况
+                    response_text = getattr(detailed_scenario, 'enhanced_response', process_result.get("empathy_response", "让我为你推荐一些适合的地方。"))
+                elif isinstance(detailed_scenario, dict) and detailed_scenario.get('error_info', {}).get('enhanced_response'):
+                    # 处理字典格式的NoRealTimeDataScenario
+                    response_text = detailed_scenario['error_info']['enhanced_response']
                 else:
                     # 降级到empathy response
                     response_text = process_result.get("empathy_response", "很棒的想法！让我为你推荐一些适合的地方。")
