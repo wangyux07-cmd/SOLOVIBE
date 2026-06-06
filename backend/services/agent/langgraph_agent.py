@@ -112,6 +112,227 @@ class LangGraphAgent:
 
         logger.info("LangGraph Agent 初始化完成（慢生活轨道模式）")
 
+    async def _analyze_react_requirements(self, message: str, emotion_profile: EmotionProfile) -> Dict[str, Any]:
+        """
+        🎯 ReAct - Stage 1: Thought (推理分析)
+        分析用户消息的复合需求，拆解情感需求和功能需求
+        
+        Args:
+            message: 用户消息
+            emotion_profile: 情感分析结果
+            
+        Returns:
+            Dict: ReAct行动计划
+        """
+        try:
+            # ================== 情感内容检测 ==================
+            # 1. 显式情感词汇检测
+            emotional_keywords = [
+                '不开心', '心情不好', '心情糟糕', '心情差', '难过', '伤心', '郁闷',
+                '烦躁', '焦虑', '压力', '累', '疲惫', '累死了', '累死', '疲惫不堪',
+                '压抑', '沮丧', '失望', '失落', '孤独', '惆怅', '烦恼', '烦闷'
+            ]
+            
+            has_explicit_emotion = any(keyword in message for keyword in emotional_keywords)
+            
+            # 2. 基于emotion_profile的压力判断
+            has_profile_emotion = emotion_profile.pressure_level > 0 or emotion_profile.energy_level < 5
+            
+            # 3. 综合情感判断 (显式优先，其次用profile)
+            has_emotional_content = has_explicit_emotion or (has_profile_emotion and not self._is_pure_location_query(message))
+            
+            # ================== 位置查询检测 ==================
+            location_keywords = [
+                '附近', '周边', '周围', '旁边', '哪儿', '哪里', '什么地方',
+                '地铁站', '火车站', '机场', '商圈', '景点', '公园', '商场', '餐厅', '咖啡'
+            ]
+            
+            has_location_query = any(keyword in message for keyword in location_keywords)
+            
+            # 提取显式地点 - 更精确的匹配
+            explicit_locations = [
+                '上海火车站', '北京站', '广州南站', '深圳北站', '杭州东站',
+                '人民广场', '外滩', '陆家嘴', '徐家汇', '静安寺', '南京路',
+                '东方明珠', '豫园', '南京西路', '淮海路', '八佰伴'
+            ]
+            
+            found_location = None
+            for location in explicit_locations:
+                if location in message:
+                    found_location = location
+                    break
+            
+            # ================== 需求类型判定 ==================
+            needs_location = has_location_query or found_location
+            needs_emotional_support = has_emotional_content
+            
+            # 优先级：情感 > 混合 > 功能性
+            if has_emotional_content and needs_location:
+                requirement_type = "mixed"
+            elif has_emotional_content:
+                requirement_type = "emotional"
+            else:
+                requirement_type = "functional"
+            
+            reaction_plan = {
+                "has_emotional_content": has_emotional_content,
+                "has_location_query": has_location_query,
+                "found_explicit_location": found_location,
+                "needs_location": needs_location,
+                "needs_emotional_support": needs_emotional_support,
+                "requirement_type": requirement_type,
+                "pressure_level": emotion_profile.pressure_level,
+                "energy_level": emotion_profile.energy_level
+            }
+
+            logger.info(f"🎯 ReAct分析完成 - 需求类型: {reaction_plan['requirement_type']}, "
+                       f"情感内容: {reaction_plan['has_emotional_content']}, "
+                       f"位置查询: {reaction_plan['has_location_query']}")
+
+            return reaction_plan
+
+        except Exception as e:
+            logger.error(f"🎯 ReAct分析失败: {e}")
+            # 降级返回默认计划
+            return {
+                "has_emotional_content": True,
+                "has_location_query": False,
+                "found_explicit_location": None,
+                "needs_location": False,
+                "needs_emotional_support": True,
+                "requirement_type": "emotional"
+            }
+    
+    def _is_pure_location_query(self, message: str) -> bool:
+        """
+        判断是否是纯粹的位置查询（无情感内容）
+        """
+        pure_location_patterns = [
+            r'.*附近.*', r'.*周边.*', r'.*哪里.*', r'.*哪儿.*',
+            r'.*什么地方.*', r'.*在哪儿.*', r'.*在那里.*'
+        ]
+        
+        for pattern in pure_location_patterns:
+            if re.search(pattern, message) and len(message) < 20:  # 短消息更可能是纯查询
+                return True
+        return False
+    
+    def _generate_emotional_care_question(self, message: str, emotion_profile: EmotionProfile) -> str:
+        """
+        为情感需求用户生成主动关怀的地址询问
+        """
+        # 基于压力等级调整语气
+        if emotion_profile.pressure_level > 0.7:
+            # 高压状态 - 更温柔的关怀
+            questions = [
+                "感受到你现在的压力比较大，找个安静的地方放松一下会很有帮助。你在哪个区域呢？我来为你找找能舒缓心情的地方🌸",
+                "理解你现在的疲惫感，换个环境对心情很有帮助。能告诉我在哪个地铁站附近吗？我来帮你找安静的去处🌿",
+                "在累的时候确实需要找个舒适的地方休息。你在哪儿呢？我帮你找个能让人放松的地方吧💫",
+                "心情不好的时候，找个安静的地方待会儿会好很多。你现在在哪个区域？我来为你物色合适的去处🍃"
+            ]
+        else:
+            # 一般情绪 - 适度关怀
+            questions = [
+                "听起来你现在状态不太好，要不要我帮你找个安静的地方放松一下？你在哪个区域呢？🌟",
+                "感到累的时候确实需要换换心情。你在哪儿呢？我来帮你找找附近有什么治愈的地方～",
+                "要不要找个舒适的地方休息一下？能告诉我在哪个地铁站附近吗？我来为你查找～",
+                "我理解你现在的感受。你在哪个区域？我帮你找找适合放松心情的地方🌱"
+            ]
+        
+        return random.choice(questions)
+    
+    def _is_valid_location(self, location: str) -> bool:
+        """
+        验证提取的地点是否为有效的地理位置
+        """
+        if not location or len(location) < 2:
+            return False
+        
+        # 过滤常见无效词
+        invalid_words = ['商场', '附近', '周边', '周围', '旁边', '边上', '在哪儿', '在那里']
+        if any(word in location for word in invalid_words):
+            return False
+        
+        # 验证包含有效地理位置特征
+        valid_patterns = [
+            r'.*(站|路|街|道|村|镇|乡|区|县|里|弄|巷)',
+            r'.*(火车站|地铁站|机场|大桥|公园|广场|大厦|大厦)',
+            r'.*(三里屯|西单|王府井|外滩|陆家嘴|徐家汇|静安寺)'
+        ]
+        
+        for pattern in valid_patterns:
+            if re.search(pattern, location):
+                return True
+        
+        # 长度检查 (中文地址通常2-8个字符)
+        return 2 <= len(location) <= 8
+
+    def _determine_search_params_based_on_react(self, reaction_plan: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        🎯 ReAct - Stage 4.1: 基于ReAct分析结果确定POI搜索参数
+        
+        Args:
+            reaction_plan: ReAct分析结果
+            
+        Returns:
+            Dict: 搜索参数
+        """
+        # 基础参数
+        params = {
+            "radius": 1000,  # 默认1公里
+            "limit": 8,      # 默认8个结果
+        }
+        
+        # 🎯 基于情感状态调整搜索策略
+        if reaction_plan.get("has_emotional_content"):
+            # 情绪问题用户需要更小范围、更近的选择
+            if reaction_plan.get("pressure_level", 0) > 0.7:
+                # 高压状态 - 500米范围内，少量精选
+                params.update({
+                    "radius": 500,
+                    "limit": 5,
+                    "preference": "quiet"  # 偏好安静场所
+                })
+            else:
+                # 一般负面情绪 - 800米范围
+                params.update({
+                    "radius": 800,
+                    "limit": 6,
+                    "preference": "healing" # 偏好疗愈场所
+                })
+        else:
+            # 功能需求用户，可以扩大范围
+            params.update({
+                "radius": 1500,
+                "limit": 10,
+                "preference": "functional" # 偏好功能性场所
+            })
+        
+        # 🎯 基于需求类型进一步细化
+        requirement_type = reaction_plan.get("requirement_type", "functional")
+        
+        if requirement_type == "emotional":
+            # 纯情绪需求，专注放松场所
+            params.update({
+                "categories": ["cafe", "bookstore", "park", "spa", "meditation"],
+                "atmosphere": "quiet_cozy"
+            })
+        elif requirement_type == "mixed":
+            # 混合需求，平衡功能性和疗愈性
+            params.update({
+                "categories": ["cafe", "bookstore", "movie_theater", "shopping_mall", "restaurant"],
+                "atmosphere": "balanced"
+            })
+        else:
+            # 功能性需求，多样化选择
+            params.update({
+                "categories": ["restaurant", "shopping_mall", "entertainment", "service"],
+                "atmosphere": "vibrant"
+            })
+        
+        logger.info(f"🎯 基于ReAct分析确定的搜索参数: {params}")
+        return params
+        
     async def _intercept_and_store_address(self, message: str, thread_state: ThreadState) -> Dict[str, Any]:
         """
         三步动作：
@@ -134,18 +355,50 @@ class LangGraphAgent:
         history_location = history_slot.get("location")
         
         # 从用户当前输入简单提取地址（中文地址常见规律）
+        # 🎯 改进的地址提取策略
+        current_location = None
+        
+        # 优先级1: 显式地点匹配 (来自 ReAct 分析)
+        if hasattr(thread_state, '_reaction_plan'):
+            found_location = thread_state._reaction_plan.get("found_explicit_location")
+            if found_location:
+                current_location = found_location
+                logger.info(f"🎯 使用 ReAct 检测到的明确地点: {current_location}")
+                # 不再提前返回，需要完成后续流程构建完整的返回
+
+        
+        # 优先级2: 智能提取附近地点
+        smart_patterns = [
+            r'([^，。！？]+)附近',      # "上海火车站附近" -> "上海火车站"
+            r'([^，。！？]+)周边',      # "陆家嘴周边" -> "陆家嘴"
+            r'([^，。！？]+)周围',      # "外滩周围" -> "外滩"
+            r'在([^，。！？]+)附近',    # "在上海火车站附近" -> "上海火车站"
+            r'([^，。！？]+)(边上|旁边)' # "商场边上" -> "商场"
+        ]
+        
+        for pattern in smart_patterns:
+            match = re.search(pattern, message)
+            if match:
+                extracted = match.group(1).strip()
+                # 验证是否为有效地点
+                if self._is_valid_location(extracted):
+                    current_location = extracted
+                    break
+        
+        # 优先级3: 原patterns (兼容性)
         location_patterns = [
             r'(在|到|去)(.*?)(附近|旁边|楼下|周围)',  # "我在三里屯soho附近"
             r'位于(.*?)(路|街|道|号)',               # "我位于朝阳区东三环中路5号"
             r'(.*?)(路|街|道)[0-9０-９]+号',        # "建国门外大街99号"
         ]
         
-        current_location = None
         for pattern in location_patterns:
             match = re.search(pattern, message)
             if match:
-                current_location = match.group(2) if len(match.groups()) > 1 else match.group(1)
-                break  # 找到一个就停止
+                extracted = match.group(2) if len(match.groups()) > 1 else match.group(1)
+                if self._is_valid_location(extracted):
+                    current_location = extracted
+                    break
         if not current_location:
             # 更严格的地址提取：只在包含明确地名关键词时才提取
             location_keywords = [
@@ -197,6 +450,9 @@ class LangGraphAgent:
                 logger.info(f"未在消息中找到有效位置信息：{message}")
         
         # 若新位置存在且跟历史不一致，则覆盖
+        # 🎯 ReAct Integration: 存储ReAct分析结果到thread_state
+        thread_state._reaction_plan = getattr(thread_state, '_reaction_plan', {})
+        
         if current_location and current_location != history_location:
             history_slot = {
                 "location": current_location,
@@ -205,33 +461,66 @@ class LangGraphAgent:
                 "updated_at": datetime.now().isoformat()
             }
             thread_state.metadata["address_slot"] = history_slot
-            logger.info(f"更新地址槽位: {current_location} (覆盖历史: {history_location})")
+            logger.info(f"🎯 更新地址槽位: {current_location} (覆盖历史: {history_location})")
         
         # 重新读取更新后的地址槽位
         address_exists = bool(thread_state.metadata.get("address_slot", {}).get("location"))
         if address_exists:
             return {
                 "address_exists": True,
-                "address_value": history_slot["location"],
-                "lat": history_slot.get("lat"),
-                "lng": history_slot.get("lng"),
-                "ai_ask_location_sentence": None
+                "address_value": thread_state.metadata["address_slot"]["location"],
+                "lat": thread_state.metadata["address_slot"].get("lat"),
+                "lng": thread_state.metadata["address_slot"].get("lng"),
+                "ai_ask_location_sentence": None 
             }
         
-        # 若地址槽位为空，根据用户情绪生成询问语句（分支B - 协议v2优化）
-        # 先共情再询问，让用户感到关怀而非机械
-        empathy_prefix = "能理解你现在的感受"
-        if any(word in message for word in ["不好", "难受", "压抑", "沮丧", "不开心", "郁闷"]):
-            empathy_prefix = "看到你现在心情不太好，我很关心你"
-        elif any(word in message for word in ["累", "疲劳", "疲惫"]):
-            empathy_prefix = "感到疲惫的时候确实需要找个安静的地方休息"
+        # 🎯 ReAct Integration: 基于ReAct分析结果生成智能询问
+        reaction_plan = getattr(thread_state, '_reaction_plan', {})
         
-        location_questions = [
-            f"{empathy_prefix}，你在哪个区域呢？我帮你找找附近有什么治愈的好地方～",
-            f"{empathy_prefix}，能告诉我你在哪个地铁站附近吗？我来为你寻找合适的去处～",
-            f"{empathy_prefix}，你现在在哪个区域？我查查附近有什么适合放松的地方呢～",
-            f"不论你现在在哪里，{empathy_prefix}。告诉我你的位置，我来为你找找好去处～"
-        ]
+        # 检查用户是否明确提到了地点但没有提取成功
+        explicit_locations_backup = ['上海火车站', '北京站', '广州南站', '深圳北站', '杭州东站', '人民广场', '外滩']
+        detected_location = None
+        for loc in explicit_locations_backup:
+            if loc in message:
+                detected_location = loc
+                break
+                
+        if detected_location and reaction_plan.get("has_emotional_content"):
+            # 用户提到了地点，但由于否定等原因被过滤了，给出智能建议
+            return {
+                "address_exists": False,
+                "address_value": None,
+                "lat": None,
+                "lng": None,
+                "ai_ask_location_sentence": f"我注意到您提到了{detected_location}，您是希望查找这个区域附近的好去处吗？或者其他位置呢？🌿"
+            }
+        
+        # 🎯 ReAct Integration: 基于情感状态和需求类型的智能共情询问
+        if reaction_plan.get("has_emotional_content"):
+            # 情绪问题为主的询问策略
+            if reaction_plan.get("pressure_level", 0) > 0.7:
+                # 高压状态 - 更温柔的询问
+                location_questions = [
+                    "感受到你现在压力比较大，能告诉我在哪个区域吗？我为你找找能放松心情的地方🌱",
+                    "理解你的压力，能说说你在哪个地铁站附近吗？我来帮你找安静的角落✨",
+                    "在压力大的时候确实需要换个环境，你在哪儿呢？我帮你物色舒适的去处💫",
+                    "心情压抑的时候，找个舒适的地方很重要。能告诉我在哪个区域吗？🌸"
+                ]
+            else:
+                # 一般负面情绪 - 适度共情
+                location_questions = [
+                    "看到你现在心情不太好，很关心你。能告诉我在哪个区域吗？我帮你找治愈的地方～",
+                    "感到疲惫的时候确实需要找个安静的地方休息，你在哪儿呢？我来为你查找～",
+                    "能理解你现在的感受，你在哪个地铁站附近呢？我来为你寻找合适的去处～",
+                    "不论你现在在哪里，我都很关心。告诉我你的位置，我来为你找找好去处～"
+                ]
+        else:
+            # 功能需求为主 - 简洁直接
+            location_questions = [
+                "你在哪个区域呢？我帮你找找附近的优质选择～",
+                "能告诉我你的位置吗？这样我能为你推荐最合适的地方✨",
+                "你在哪儿呢？我来帮你搜索附近的好去处🌟"
+            ]
         
         return {
             "address_exists": False,
@@ -265,15 +554,35 @@ class LangGraphAgent:
         # 2. 氛围强度评估
         vibe_context = await self._vibe_intensity_assessment(emotion_profile, thread_state)
         
-        # Step 1: 从当前消息中提取地址并更新state
+        # 🎯 ReAct Stage 1: Thought - 分析复合需求
+        # 用户可能同时表达情感和具体需求，需要智能拆解
+        reaction_plan = await self._analyze_react_requirements(message, emotion_profile)
+        
+        # 🎯 ReAct Integration: 将ReAct分析结果传递给thread_state
+        thread_state._reaction_plan = reaction_plan
+        
+        # 🎯 ReAct Stage 2: Action - 尝试获取位置信息  
         address_result = await self._intercept_and_store_address(message, thread_state)
         
-        # Step 2: 基于地址处理结果做决策（Protocol v2.0 修复）  
-        if not address_result["address_exists"]:
-            # 分支B: 地址不存在，温柔询问（保护隐私，只问地铁站或区域）
+        # 🎯 ReAct Stage 3: Observation & Decision
+        if not address_result["address_exists"] and reaction_plan["needs_location"]:
+            # 分支B: 地址不存在但用户需要位置服务，温柔询问（保护隐私，只问地铁站或区域）
             return {
                 "type": "clarification",
                 "empathy_response": address_result["ai_ask_location_sentence"],
+                "requires_clarification": True,
+                "address_query": True,
+            }
+        
+        # 🎯 新增分支: 纯情感需求用户，主动关怀询问位置
+        if (not address_result["address_exists"] and 
+            reaction_plan["has_emotional_content"] and 
+            reaction_plan["requirement_type"] == "emotional"):
+            # 分支C: 用户有情绪问题，主动询问是否要找个地方放松
+            emotional_care_question = self._generate_emotional_care_question(message, emotion_profile)
+            return {
+                "type": "emotional_care",
+                "empathy_response": emotional_care_question,
                 "requires_clarification": True,
                 "address_query": True,
             }
@@ -296,7 +605,7 @@ class LangGraphAgent:
         
         # 🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕
         # Step 1: 通过高德Geo注入坐标（如果尚未注入）
-        if address_result["lat"] is None or address_result["lng"] is None:
+        if (address_result["lat"] is None or address_result["lng"] is None) and "address_slot" in thread_state.metadata:
             location_coords = await self.booking_execution_tool.get_location_by_query(
                 thread_state.metadata["address_slot"]["location"]
             )
@@ -306,16 +615,20 @@ class LangGraphAgent:
                 logger.info(f"通过Geo注入位置: {thread_state.metadata['address_slot']['location']} (lat={location_coords['lat']}, lng={location_coords['lng']})")
         
         # 🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕🆕
-        # Step 2: 先用小范围POI搜索获取附近的候选商家
+        # 🎯 ReAct Stage 4: Action - 智能POI搜索（基于用户情绪需求）
         initial_plans = []
-        lat = thread_state.metadata["address_slot"].get("lat")
-        lng = thread_state.metadata["address_slot"].get("lng")
+        address_slot = thread_state.metadata.get("address_slot", {})
+        lat = address_slot.get("lat")
+        lng = address_slot.get("lng")
+        
+        # 🎯 ReAct Integration: 基于用户情绪和需求调整搜索策略
+        search_params = self._determine_search_params_based_on_react(reaction_plan)
         
         if lat and lng:
             nearby_pois = await self.booking_execution_tool.route_query_to_pois(
-                thread_state.metadata["address_slot"]["location"],
-                radius=1000,
-                results_limit=8
+                address_slot["location"],
+                radius=search_params["radius"],
+                results_limit=search_params["limit"]
             )
             
             for poi in nearby_pois:
@@ -411,6 +724,14 @@ class LangGraphAgent:
                 logger.warning(f"序列化更新方案失败: {e}，使用字符串表示")
                 serialized_updated_scenario = str(updated_scenario)
         
+        # 🎯 序列化处理: 确保所有数据都可JSON序列化
+        safe_booking_assessment = None
+        if booking_assessment:
+            # 深拷贝并确保所有枚举都被转换为字符串
+            safe_booking_assessment = booking_assessment.copy()
+            if 'risk_level' in safe_booking_assessment and hasattr(safe_booking_assessment['risk_level'], 'value'):
+                safe_booking_assessment['risk_level'] = safe_booking_assessment['risk_level'].value
+        
         await self._save_enhanced_checkpoint(thread_state.thread_id, {
             "emotion_profile": asdict(emotion_profile),
             "vibe_context": {
@@ -422,7 +743,7 @@ class LangGraphAgent:
             "quest_narrative": asdict(quest_narrative),
             "detailed_scenario": serialized_scenario,
             "updated_scenario": serialized_updated_scenario,
-            "booking_assessment": booking_assessment,
+            "booking_assessment": safe_booking_assessment,
             "copresence": copresence_info,
             "last_message": message
         })
@@ -698,7 +1019,8 @@ class LangGraphAgent:
             user_message, scenario_mode
         )
         
-        logger.info(f"详细方案生成完成 - 商家: {detailed_scenario.merchant.name}")
+        merchant_name = getattr(getattr(detailed_scenario, 'merchant', None), 'name', '未知商家')
+        logger.info(f"详细方案生成完成 - 商家: {merchant_name}")
         return detailed_scenario
     
     async def _real_time_info_retrieval(self, 
@@ -715,8 +1037,14 @@ class LangGraphAgent:
             self.web_search_tool = WebSearchTool()
         
         try:
-            merchant_name = detailed_scenario.merchant.name
-            merchant_address = detailed_scenario.merchant.location.address
+            # 安全获取商家信息
+            if not detailed_scenario or not hasattr(detailed_scenario, 'merchant') or not detailed_scenario.merchant:
+                logger.info("实时信息检索：商家对象为None，跳过检索")
+                return detailed_scenario
+            
+            merchant_name = getattr(detailed_scenario.merchant, 'name', '未知商家')
+            location_obj = getattr(detailed_scenario.merchant, 'location', None)
+            merchant_address = getattr(location_obj, 'address', '未知地址')
             
             if not merchant_name or not merchant_address:
                 logger.info("跳过实时信息检索 - 缺少商家信息")
@@ -774,11 +1102,16 @@ class LangGraphAgent:
             return None
         
         try:
+            # 安全检查属性存在性
+            if not detailed_scenario or not hasattr(detailed_scenario, 'merchant') or not detailed_scenario.merchant:
+                logger.info("预订评估：商家对象不存在或为None")
+                return None
+                
             merchant_info = {
-                'name': detailed_scenario.merchant.name,
-                'address': detailed_scenario.merchant.location.address,
-                'type': detailed_scenario.merchant.type.value,
-                'contact': detailed_scenario.merchant.contact
+                'name': getattr(detailed_scenario.merchant, 'name', '未知商家'),
+                'address': getattr(getattr(detailed_scenario.merchant, 'location', None), 'address', '未知地址'),
+                'type': getattr(getattr(detailed_scenario.merchant, 'type', None), 'value', '未知类型'),
+                'contact': getattr(detailed_scenario.merchant, 'contact', '未提供')
             }
             cost_info = {
                 'consumption': detailed_scenario.cost_breakdown.consumption,

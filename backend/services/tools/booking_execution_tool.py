@@ -997,18 +997,8 @@ class PlaywrightBookingExecutionTool:
         try:
             import re
             
-            # 检查是否是纯情感表达或没有具体地址的句子
-            emotional_patterns = [
-                r".*[骂|批|训|吵|哭|笑|累|烦|困|饿|渴|冷|热|好|坏].*",
-                r"^[^\\s，。！？]{1,4}$"  # 太短的句子很可能是情感词
-            ]
-            
-            for pattern in emotional_patterns:
-                if re.search(pattern, query):
-                    logger.info(f"检测到情感表达，不进行地理编码：{query}")
-                    return None
-            
-            # 检查是否是负面表达
+            # 移除硬编码的情感检测，让上层Agent来决策
+            # 检查是否是负面表达（仅处理明确的否定句式）
             negation_patterns = [
                 r"(不|没|非|无)在.*",
                 r".*(不|没|非|无)在",

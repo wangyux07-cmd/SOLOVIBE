@@ -18,15 +18,16 @@ async def test():
             )
             
             print(f"搜索查询: {query.query} in {query.location}")
+            print(f"主搜索引擎: {search_tool.primary_engine.value}")
             result = await search_tool.search_business_info(query)
             
             if result:
-                print(f"✓ Tavily搜索成功: {result.merchant_name}")
+                print(f"✓ 搜索成功 [{search_tool.primary_engine.value}]: {result.merchant_name}")
                 print(f"  状态: {result.current_status}")
                 print(f"  地址: {result.address}")
                 print(f"  是否营业: {result.is_open}")
             else:
-                print("✗ Tavily搜索返回空结果")
+                print("✗ 搜索返回空结果")
                 
     except Exception as e:
         print(f"✗ Tavily搜索异常: {e}")

@@ -56,7 +56,7 @@ class WebSearchTool:
     支持多种搜索引擎和降级策略
     """
     
-    def __init__(self, primary_engine: SearchEngine = SearchEngine.TAVILY):
+    def __init__(self, primary_engine: SearchEngine = SearchEngine.SERPER):
         self.primary_engine = primary_engine
         self.session = None
         self.cache = {}  # 简单的内存缓存
@@ -391,11 +391,15 @@ class WebSearchTool:
         
         # 如果主引擎失败，尝试备选引擎
         if not result:
-            logger.info(f"主引擎失败，尝试备选引擎")
+            logger.info(f"主引擎超，备选")
             if self.primary_engine != SearchEngine.SERPER and self.serper_api_key:
                 result = await self._search_serper(search_query)
+                if result:
+                    logger.info("✅ Serper备选成功")
             elif self.primary_engine != SearchEngine.TAVILY and self.tavily_api_key:
                 result = await self._search_tavily(search_query)
+                if result:
+                    logger.info("✅ Tavily备选成功")
         
         # 如果所有API都失败，使用缓存降级
         if not result:
