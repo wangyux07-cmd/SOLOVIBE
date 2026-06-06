@@ -993,11 +993,47 @@ class PlaywrightBookingExecutionTool:
                 self.logger.error(f"发送反馈失败: {e}")
 
     async def get_location_by_query(self, query: str) -> Optional[Dict[str, float]]:
-        """通过查询获取位置坐标（模拟高德Geocoding API）"""
+        """通过查询获取位置坐标（使用高德Geocoding API）"""
         try:
-            # 模拟地理编码结果
-            # 真实实现中应该调用高德Geocoding API
-            mock_coordinates = {
+            import re
+            
+            # 检查是否是纯情感表达或没有具体地址的句子
+            emotional_patterns = [
+                r".*[骂|批|训|吵|哭|笑|累|烦|困|饿|渴|冷|热|好|坏].*",
+                r"^[^\\s，。！？]{1,4}$"  # 太短的句子很可能是情感词
+            ]
+            
+            for pattern in emotional_patterns:
+                if re.search(pattern, query):
+                    logger.info(f"检测到情感表达，不进行地理编码：{query}")
+                    return None
+            
+            # 检查是否是负面表达
+            negation_patterns = [
+                r"(不|没|非|无)在.*",
+                r".*(不|没|非|无)在",
+                r"(远离|避开|离开).*",
+                r"不.*去.*",
+                r"没.*去.*"
+            ]
+            
+            for pattern in negation_patterns:
+                if re.search(pattern, query):
+                    logger.info(f"检测到否定表达，跳过地理编码：{query}")
+                    return None
+            
+            # 优先尝试高德地理编码API
+            coords = await self._call_amap_geocoding(query)
+            if coords:
+                logger.info(f"高德地理编码成功: {query} -> {coords}")
+                return coords
+            
+            # 如果高德API失败，回退到智能匹配
+            logger.info(f"高德地理编码失败，尝试智能匹配: {query}")
+            
+            # 扩展的地名数据库，包含地铁站、商圈等
+            fallback_coordinates = {
+                # 北京地区
                 "三里屯": {"lat": 39.9368, "lng": 116.4472},
                 "西单大悦城": {"lat": 39.9058, "lng": 116.3806},
                 "王府井": {"lat": 39.9097, "lng": 116.4074},
@@ -1008,51 +1044,74 @@ class PlaywrightBookingExecutionTool:
                 "建国门": {"lat": 39.9088, "lng": 116.4360},
                 "四惠": {"lat": 39.9068, "lng": 116.4998},
                 "望京": {"lat": 39.9928, "lng": 116.4712},
+                # 上海地区
+                "上海大学站": {"lat": 31.3206, "lng": 121.3906},
+                "锦秋路站": {"lat": 31.3262, "lng": 121.3844},
+                "复旦大学": {"lat": 31.2990, "lng": 121.5019},
+                "徐家汇": {"lat": 31.1959, "lng": 121.4365},
+                "陆家嘴": {"lat": 31.2396, "lng": 121.4994},
+                "人民广场": {"lat": 31.2361, "lng": 121.4726},
+                "静安寺": {"lat": 31.2235, "lng": 121.4458},
             }
             
-            # 检查是否是纯情感表达或没有具体地址的句子
-            emotional_patterns = [
-                r".*[骂|批|训|吵|哭|笑|累|烦|困|饿|渴|冷|热|好|坏].*",
-                r"^[^\\s，。！？]{1,4}$"  # 太短的句子很可能是情感词
-            ]
-            
-            import re
-            for pattern in emotional_patterns:
-                if re.search(pattern, query):
-                    logger.info(f"检测到情感表达，不进行地理编码：{query}")
-                    return None
-            
-            # 更严格的匹配逻辑：需要完整包含地理位置关键词
-            for key, coords in mock_coordinates.items():
+            # 智能匹配逻辑
+            for key, coords in fallback_coordinates.items():
                 if key in query:
-                    # 检查是否是负面表达
-                    negation_patterns = [
-                        f"(不|没|非|无)在.*{key}",
-                        f"{key}.*(不|没|非|无)在",
-                        f"(远离|避开|离开){key}",
-                        f"不.*去.*{key}",
-                        f"没.*去.*{key}"
-                    ]
-                    
-                    is_negated = False
-                    for pattern in negation_patterns:
-                        if re.search(pattern, query):
-                            is_negated = True
-                            logger.info(f"检测到否定表达，跳过位置匹配：{query}")
-                            break
-                    
-                    if not is_negated:
-                        logger.info(f"获取位置成功: {query} -> {coords}")
-                        return coords
+                    logger.info(f"智能匹配成功: {query} -> {key} -> {coords}")
+                    return coords
             
-            # 默认位置（北京中心）
-            default_coords = {"lat": 39.9042, "lng": 116.4074}
-            logger.info(f"使用默认位置: {query} -> {default_coords}")
-            return default_coords
+            # 如果所有方法都失败，返回None而不是默认北京坐标
+            logger.warning(f"无法确定位置坐标: {query}，不返回默认坐标")
+            return None
             
         except Exception as e:
             logger.error(f"获取位置失败: {e}")
             return None
+    
+    async def _call_amap_geocoding(self, query: str) -> Optional[Dict[str, float]]:
+        """调用高德地理编码API"""
+        try:
+            amap_key = os.getenv('AMAP_API_KEY')
+            amap_base_url = os.getenv('AMAP_BASE_URL', 'https://restapi.amap.com/v3')
+            
+            if not amap_key or amap_key.startswith('your-'):
+                logger.debug("AMAP_API_KEY未配置，跳过API调用")
+                return None
+            
+            async with aiohttp.ClientSession() as session:
+                # 高德地理编码API
+                geocoding_url = f"{amap_base_url}/geocode/geo"
+                params = {
+                    'key': amap_key,
+                    'address': query,
+                    'city': ''  # 不限制城市，让API自动判断
+                }
+                
+                logger.debug(f"调用高德地理编码API: {query}")
+                async with session.get(geocoding_url, params=params, timeout=10) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        
+                        if data.get('status') == '1' and data.get('geocodes'):
+                            geocode = data['geocodes'][0]
+                            location = geocode.get('location', '')
+                            if location:
+                                lng, lat = location.split(',')
+                                coords = {
+                                    'lat': float(lat),
+                                    'lng': float(lng)
+                                }
+                                logger.info(f"高德API返回地理编码: {query} -> {coords}")
+                                return coords
+                        
+                        logger.warning(f"高德地理编码无结果: {query}, info: {data.get('info', 'Unknown')}")
+                    else:
+                        logger.error(f"高德API请求失败: {response.status}")
+        
+        except Exception as e:
+            logger.error(f"高德地理编码异常: {e}")
+        
+        return None
 
     async def route_query_to_pois(self, query: str, radius: int = 1000, results_limit: int = 8) -> List[AmapPoiResult]:
         """将查询转换为POI列表（模拟高德Place Search API）"""
@@ -1164,7 +1223,7 @@ class PlaywrightBookingExecutionTool:
                     AmapPoiResult(
                         id=f"poi_generic_{i+1}",
                         name=f"{query}附近安静角落{i+1}",
-                        address=f"北京市{query}附近",
+                        address=f"{query}附近",  # 移除"北京市"硬编码前缀
                         location=f"{location['lng']+0.001*i},{location['lat']+0.001*i}",
                         type="休闲",
                         typecode="120000",

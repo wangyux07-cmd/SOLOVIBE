@@ -341,7 +341,7 @@ class LangGraphAgent:
         
         # Step 4: 基于实时检索结果生成详细方案
         detailed_scenario = await self._generate_enhanced_detailed_scenario(
-            vibe_context, message, quest_narrative, enhanced_plans
+            vibe_context, message, quest_narrative, enhanced_plans, thread_state
         )
         
         # 5. 批量实时信息检索结果写入方案
@@ -1215,7 +1215,8 @@ class LangGraphAgent:
                                                 vibe_context, 
                                                 user_message: str, 
                                                 quest_narrative, 
-                                                enhanced_plans: List[Dict] = None) -> Any:
+                                                enhanced_plans: List[Dict] = None,
+                                                thread_state = None) -> Any:
         """基于实时检索结果生成增强详细方案"""
         # 根据心境选择合适的方案模式
         mode_mapping = {
@@ -1269,11 +1270,31 @@ class LangGraphAgent:
                 )
                 logger.info("降级到标准方案生成")
         else:
-            # 没有可用商家时，使用标准方案生成
-            detailed_scenario = self.scenario_generator.generate_complete_enhanced_scenario(
-                user_message, scenario_mode
+            # 没有可用商家时，返回特殊标记让LLM生成解释性回复
+            from dataclasses import dataclass
+            
+            @dataclass
+            class NoRealTimeDataScenario:
+                """实时数据不可用时的特殊场景对象"""
+                scenario_type: str = "no_real_time_data"
+                user_location: str = ""
+                failure_reason: str = ""
+                
+                # 添加enhanced_response属性以触发LLM处理
+                @property 
+                def enhanced_response(self):
+                    return f"很抱歉，我在获取{self.user_location}附近的实时商家信息时遇到了技术问题。让我为您提供一些通用的建议..."
+            
+            # 创建特殊场景对象
+            user_location = "该位置"
+            if thread_state and hasattr(thread_state, 'metadata'):
+                user_location = thread_state.metadata.get("address_slot", {}).get("location", "该位置")
+            
+            detailed_scenario = NoRealTimeDataScenario(
+                user_location=user_location,
+                failure_reason="实时搜索失败或无可用商家"
             )
-            logger.info("无实时商家可用，使用标准方案生成")
+            logger.info(f"实时商家搜索失败，创建特殊场景对象: {detailed_scenario.user_location}")
         
         logger.info(f"增强详细方案生成完成 - 模式: {scenario_mode}")
         return detailed_scenario
@@ -1286,6 +1307,18 @@ class LangGraphAgent:
         def score_plan(plan):
             rating = plan.get("rating", 0) or 0
             distance = plan.get("distance", 999) or 999
+            
+            # 将距离转换为数字（处理字符串格式的距离）
+            try:
+                if isinstance(distance, str):
+                    # 处理带单位的字符串距离（如 "1.5km", "150m"）
+                    distance_clean = distance.lower().replace('km', '').replace('m', '').strip()
+                    distance = float(distance_clean)
+                else:
+                    distance = float(distance)
+            except (ValueError, TypeError):
+                distance = 999.0  # 默认值：较远距离
+            
             # 评分优先，距离次要
             return (rating * 1000) - (distance / 10)
         

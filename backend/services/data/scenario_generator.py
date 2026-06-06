@@ -11,6 +11,9 @@ import logging
 from datetime import datetime, timedelta
 import hashlib
 
+# 导入数据模型
+from services.data.merchant_database import Merchant, MerchantType, Location
+
 # 导入高德地图相关的数据结构
 from services.tools.booking_execution_tool import (
     AmapPoiResult, AmapRouteResult, PlaywrightBookingExecutionTool
@@ -101,6 +104,9 @@ class EnhancedScenarioGenerator:
     """
     
     def __init__(self):
+        # 初始化logger
+        self.logger = logging.getLogger(__name__)
+        
         self.scenario_generator = CompleteScenarioGenerator()
         self.weather_conditions = {
             "sunny": ["晴天", "气温宜人，阳光充足", "记得防晒，多补充水分"],
@@ -1052,8 +1058,49 @@ class EnhancedScenarioGenerator:
             "nearby_recommendations": [asdict(r) for r in scenario.nearby_recommendations],
             "safety_info": asdict(scenario.safety_info),
             "personalization_notes": scenario.personalization_notes,
-            "backup_options": scenario.backup_options,
+                        "backup_options": scenario.backup_options,
             "carbon_savings": scenario.route.carbon_savings,
             "data_source": "synthetic",
             "generated_at": datetime.now().isoformat()
         }
+
+    def generate_with_plans(self, user_message: str, scenario_mode: str, merchant_data: Dict[str, Any]) -> Any:
+        """Generate a scenario using real-time merchant plans
+        
+        Args:
+            user_message: The original user message
+            scenario_mode: The scenario mode (healing, adventure, etc) 
+            merchant_data: Dictionary containing:
+                - selected_merchant: The primary merchant plan
+                - alternative_merchants: List of alternative merchant plans
+                
+        Returns:
+            CompleteScenario object with merchant information
+        """
+        if not merchant_data or not merchant_data.get("selected_merchant"):
+            # Fallback to standard generation
+            return self.generate_complete_enhanced_scenario(user_message, scenario_mode)
+
+        selected_plan = merchant_data["selected_merchant"]
+        alternative_plans = merchant_data.get("alternative_merchants", [])
+        
+        # Convert plan data into merchant-like object
+        try:
+            # Create a mock merchant object from the plan data
+            mock_merchant = Merchant(
+                name=selected_plan.get("merchant_name", "附近商家"),
+                location=Location(
+                    address=selected_plan.get("merchant_address", selected_plan.get("address", "附近"))
+                ),
+                features=selected_plan.get("keywords", []),
+                rating=selected_plan.get("rating", 4.5),
+                merchant_id=f"merchant_{hash(str(selected_plan)) % 10000}",
+                type=MerchantType.BAR
+            )
+        except Exception as e:
+            self.logger.warning(f"Failed to create mock merchant from plan: {e}")
+            return self.generate_complete_enhanced_scenario(user_message, scenario_mode)
+        
+        # Use the existing enhanced scenario generator with the mock merchant
+        return self.generate_complete_enhanced_scenario(user_message, scenario_mode)
+

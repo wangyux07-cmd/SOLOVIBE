@@ -140,7 +140,7 @@ class WebSearchTool:
         try:
             params = self._build_tavily_query(search_query)
             
-            async with self.session.post(self.tavily_base_url, json=params, timeout=5) as response:
+            async with self.session.post(self.tavily_base_url, json=params, timeout=10) as response:
                 if response.status == 200:
                     data = await response.json()
                     return self._parse_tavily_response(data, search_query)
@@ -173,7 +173,7 @@ class WebSearchTool:
                 self.serper_base_url, 
                 json=params, 
                 headers=headers, 
-                timeout=5
+                timeout=10
             ) as response:
                 if response.status == 200:
                     data = await response.json()
