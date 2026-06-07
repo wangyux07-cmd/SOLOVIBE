@@ -10,7 +10,3 @@
 [![Supabase](https://img.shields.io/badge/Database-Supabase-yellow?style=for-the-badge)](https://supabase.com/)
 
 </div>
-
-## 📖 项目介绍
-
-SoloVibe (
