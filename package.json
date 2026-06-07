@@ -1,5 +1,38 @@
 {
-  "dependencies": {
+  "name": "solovibe-fullstack",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Full-stack application with Vite frontend and Python backend",
+  "type": "module",
+  "scripts": {
+    "dev": "cd frontend && npm run dev",
+    "build": "cd frontend && npm run build",
+    "preview": "cd frontend && npm run preview",
+    "start": "cd frontend && npm run start",
+    "clean": "cd frontend && npm run clean",
+    "lint": "cd frontend && npm run lint",
+    "backend": "cd backend && python main.py",
+    "install:frontend": "cd frontend && npm install",
+    "install:backend": "cd backend && pip install -r requirements.txt",
+    "install:all": "npm run install:frontend && npm run install:backend"
+  },
+  "engines": {
+    "node": ">=20.19.0"
+  },
+  "workspaces": [
+    "frontend"
+  ],
+  "keywords": [
+    "vite",
+    "react",
+    "typescript",
+    "fullstack",
+    "python"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {},
+  "devDependencies": {
     "vite": "^6.0.0"
   }
 }
