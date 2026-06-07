@@ -6,7 +6,7 @@
   "type": "module",
   "scripts": {
     "dev": "cd frontend && npm run dev",
-    "build": "npm install --prefix frontend && ls -la frontend/node_modules/.bin/ && npm run build --prefix frontend",
+    "build": "npm install --prefix frontend && echo '=== Dependencies installed ===' && ls -la frontend/dist/ || echo '=== No dist directory yet ===' && npm run build --prefix frontend && echo '=== Build completed ===' && ls -la frontend/dist/ || echo '=== Build failed ==='",
     "preview": "cd frontend && npm run preview",
     "start": "cd frontend && npm run start",
     "clean": "cd frontend && npm run clean",
