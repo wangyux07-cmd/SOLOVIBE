@@ -6,7 +6,7 @@
   "type": "module",
   "scripts": {
     "dev": "cd frontend && npm run dev",
-    "build": "cd frontend && npm install --legacy-peer-deps && npx vite build",
+    "build": "cd frontend && npm run build",
     "preview": "cd frontend && npm run preview",
     "start": "cd frontend && npm run start",
     "clean": "cd frontend && npm run clean",
@@ -32,7 +32,5 @@
   "author": "",
   "license": "MIT",
   "dependencies": {},
-  "devDependencies": {
-    "vite": "^6.0.0"
-  }
+  "devDependencies": {}
 }
