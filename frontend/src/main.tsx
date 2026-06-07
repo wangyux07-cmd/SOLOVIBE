@@ -1,6 +1,7 @@
 import { StrictMode, Component, ErrorInfo, ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
 import App from './App.tsx';
+import TestMinimal from '../test_minimal.tsx';
 import './index.css';
 
 // 1. 定义一个高强度的“错误捕获盾牌”

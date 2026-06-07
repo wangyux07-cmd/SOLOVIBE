@@ -56,12 +56,15 @@ import {
   COMMUNITY_LINES,
   MAP_PINS,
   RECOMMENDED_PLACES,
-  RIVERSIDE_EVAL_DIMENSIONS
+  RIVERSIDE_EVAL_DIMENSIONS,
+  ROUTE_MERCHANTS
 } from "./data";
 
 export default function App() {
+  console.log("App component is starting to render");
   // Mobile chassis navigation state
   const [currentScreen, setCurrentScreen] = useState<ScreenId>("chat");
+  const [selectedMerchantId, setSelectedMerchantId] = useState<string>("line-1");
 
   // HashRouter state synchronization
   useEffect(() => {
@@ -101,8 +104,8 @@ export default function App() {
   const [selectedWanderMood, setSelectedWanderMood] = useState<string>("轻松放空");
 
   // User Exploration Stats
-  const [score, setScore] = useState(24);
-  const [completedQuests, setCompletedQuests] = useState(8);
+  const [score, setScore] = useState(0);
+  const [completedQuests, setCompletedQuests] = useState(0);
   const [isChallengeAccepted, setIsChallengeAccepted] = useState(false);
   const [isChallengeCompleted, setIsChallengeCompleted] = useState(false);
   const [hasCheckedInToday, setHasCheckedInToday] = useState(false);
@@ -115,24 +118,6 @@ export default function App() {
       role: "model",
       content: "嗨，周末好呀 👋 我是你的城市漫步伙伴 Solo。今天外面的阳光很不错，感觉心情怎么样？或者有什么特别想去的地方吗？",
       timestamp: "今天 10:42 AM"
-    },
-    {
-      id: "msg-2",
-      role: "user",
-      content: "最近有点累，想找个地方放空 🧘",
-      timestamp: "今天 10:43 AM"
-    },
-    {
-      id: "msg-3",
-      role: "model",
-      content: "完全理解，有时候就是需要按下暂停键。给自己安排一点专属时间吧。你希望大概花多少时间？想走远点还是就在附近转转？",
-      timestamp: "今天 10:43 AM"
-    },
-    {
-      id: "msg-4",
-      role: "user",
-      content: "1-2小时，就在家附近吧",
-      timestamp: "今天 10:44 AM"
     }
   ]);
   const [inputText, setInputText] = useState("");
@@ -256,7 +241,7 @@ export default function App() {
       const modelMsg: Message = {
         id: `msg-${Date.now() + 1}`,
         role: "model",
-        content: data.response || "有点断网了，不过别影响心情，去附近的角落漫游走起！🌿",
+        content: data.response || "正在为您寻找附近的好去处...",
         timestamp: new Date().toLocaleTimeString("zh-CN", {
           hour: "2-digit",
           minute: "2-digit",
@@ -272,7 +257,7 @@ export default function App() {
         const fallbackMsg: Message = {
           id: `msg-${Date.now() + 1}`,
           role: "model",
-          content: "我已经为你精挑细选了3个超棒的一人方案！现在你可以一键查看并定制它们，开启这次静谧之约哦。☕🍃",
+          content: "正在为您生成推荐方案...",
           timestamp: new Date().toLocaleTimeString("zh-CN", {
             hour: "2-digit",
             minute: "2-digit"
@@ -331,7 +316,7 @@ export default function App() {
       )
     );
     setHasCheckedInToday(true);
-    alert("🎉 恭喜完成今日一人挑战！探索值 +50 已到账，您今天的漫游勋章已点亮！");
+    alert("🎉 恭喜完成今日一人挑战！探索值已增加，您今天的漫游勋章已点亮！");
     pushScreen("map");
   };
 
@@ -626,7 +611,7 @@ export default function App() {
                           <Sparkles className="w-4 h-4 fill-green-600" />
                         </div>
                         <p className="text-xs text-green-900 leading-tight">
-                          今天的挑战很有意思，点亮 30 分钟专属个人的河畔呼吸。✨
+                          今天的挑战很有意思，点亮专属个人的河畔呼吸。✨
                         </p>
                       </div>
 
@@ -660,7 +645,7 @@ export default function App() {
                           </div>
                           <div className="flex flex-col items-center">
                             <Clock className="w-4 h-4 text-[#725c00] mb-1" />
-                            <span className="text-[10px] text-[#725c00] font-bold">30 分钟</span>
+                            <span className="text-[10px] text-[#725c00] font-bold">专属时间</span>
                           </div>
                           <div className="flex flex-col items-center">
                             <CreditCard className="w-4 h-4 text-[#006c4f] mb-1" />
@@ -747,7 +732,7 @@ export default function App() {
                                   3. 个人静享专注
                                   <span className="inline-block w-1.5 h-1.5 rounded-full bg-amber-500 animate-ping" />
                                 </p>
-                                <p className="text-[10px] text-stone-500 transition-colors group-hover:text-stone-600">听歌、呼吸或观察，正享受专属你的沉浸 30 分钟</p>
+                                <p className="text-[10px] text-stone-500 transition-colors group-hover:text-stone-600">听歌、呼吸或观察，正享受专属你的沉浸时光</p>
                               </div>
                             </div>
 
@@ -833,7 +818,7 @@ export default function App() {
                             <div className="space-y-1">
                               <p className="text-sm text-emerald-900 font-extrabold">🎉 挑战圆满达成！已收获漫步勋章</p>
                               <p className="text-[11px] text-emerald-700 leading-normal">
-                                你今天的专属独处心境手记已由 AI 加密封存。累积的 50 探索值已记入这一座城市。
+                                你今天的专属独处心境手记已由 AI 加密封存。探索值已记入这一座城市。
                               </p>
                             </div>
 
@@ -1439,7 +1424,10 @@ export default function App() {
                           <div 
                             key={line.id}
                             className="p-3 bg-white rounded-2xl border border-stone-200/60 shadow-xs flex items-center justify-between hover:shadow-md transition-shadow shrink-0 cursor-pointer"
-                            onClick={() => pushScreen("index")}
+                            onClick={() => {
+                              setSelectedMerchantId(line.id);
+                              pushScreen("index");
+                            }}
                           >
                             <div className="flex items-center gap-3">
                               <div className="w-14 h-14 rounded-xl overflow-hidden shrink-0 border border-stone-100">
@@ -1613,7 +1601,7 @@ export default function App() {
                       {/* Check-in completed pin */}
                       <div className="absolute top-[50px] right-[70px]">
                         <div 
-                          onClick={() => alert("已完成打卡的：静谧小吃餐馆。你累积了50探索值！")}
+                          onClick={() => alert("已完成打卡的：静谧小吃餐馆。探索值已增加！")}
                           className="w-10 h-10 rounded-full bg-teal-500 shadow-md border-2 border-white flex items-center justify-center text-white cursor-pointer active:scale-95 duration-100"
                         >
                           <Store className="w-4.5 h-4.5" />
@@ -1653,7 +1641,7 @@ export default function App() {
                     <div className="flex gap-3 overflow-x-auto py-2 shrink-0 hide-scrollbar scroll-smooth">
                       <div className="min-w-[125px] p-3.5 bg-white rounded-xl border border-stone-200/50 flex flex-col gap-1 shadow-xs">
                         <span className="text-[10px] text-stone-400 font-bold">已点亮</span>
-                        <span className="text-sm font-extrabold text-[#725c00]">24 个商家</span>
+                        <span className="text-sm font-extrabold text-[#725c00]">0 个商家</span>
                       </div>
                       <div className="min-w-[125px] p-3.5 bg-white rounded-xl border border-stone-200/50 flex flex-col gap-1 shadow-xs">
                         <span className="text-[10px] text-stone-400 font-bold">已完成</span>
@@ -1661,9 +1649,9 @@ export default function App() {
                       </div>
                       <div className="min-w-[125px] p-3.5 bg-white rounded-xl border border-stone-200/50 flex flex-col gap-1 shadow-xs">
                         <span className="text-[10px] text-stone-400 font-bold">探索进度</span>
-                        <span className="text-sm font-extrabold text-neutral-900">12%</span>
+                        <span className="text-sm font-extrabold text-neutral-900">0%</span>
                         <div className="w-full bg-stone-100 h-1.5 rounded-full overflow-hidden mt-1">
-                          <div className="bg-[#725c00] h-full w-[12%]" />
+                          <div className="bg-[#725c00] h-full w-[0%]" />
                         </div>
                       </div>
                     </div>
@@ -1744,7 +1732,7 @@ export default function App() {
                         <div className="flex gap-2 shrink-0">
                           <span className="px-2.5 py-0.5 rounded-full bg-white/40 text-[9px] font-bold border border-white/50 flex items-center gap-0.5 shadow-xs">
                             <PlusCircle className="w-3 h-3 text-amber-950" />
-                            探索值 +50
+                            探索值
                           </span>
                           <span className="px-2.5 py-0.5 rounded-full bg-white/40 text-[9px] font-bold border border-white/50 flex items-center gap-0.5 shadow-xs">
                             <Award className="w-3 h-3 text-amber-950" />
@@ -1803,11 +1791,11 @@ export default function App() {
                         支撑引擎：一人友好度指数评测
                       </div>
                       <h2 className="text-lg font-bold font-display-lg text-neutral-900 leading-tight">
-                        Riverside Brew 河畔咖啡
+                        {ROUTE_MERCHANTS[selectedMerchantId as keyof typeof ROUTE_MERCHANTS].name}
                       </h2>
                       <div className="inline-flex items-center bg-stone-100 p-1 px-3 mt-1.5 rounded-full text-[10.5px] font-bold text-stone-500 gap-1 select-none">
                         <Store className="w-3.5 h-3.5 text-[#725c00]" />
-                        <span>精品咖啡 / 独处空间</span>
+                        <span>{ROUTE_MERCHANTS[selectedMerchantId as keyof typeof ROUTE_MERCHANTS].category}</span>
                       </div>
                     </div>
 
@@ -1831,7 +1819,7 @@ export default function App() {
                             stroke="#ffd000" 
                             strokeWidth="8" 
                             strokeDasharray="339.292" 
-                            strokeDashoffset="44.108" // roughly 87% progress
+                            strokeDashoffset={339.292 - (ROUTE_MERCHANTS[selectedMerchantId as keyof typeof ROUTE_MERCHANTS].score / 100) * 339.292}
                             strokeLinecap="round"
                             className="transform rotate-[-90deg] origin-[60px_60px]"
                           />
@@ -1839,7 +1827,9 @@ export default function App() {
                         
                         {/* Gauge inner texts */}
                         <div className="absolute inset-0 flex flex-col items-center justify-center">
-                          <span className="text-3xl font-extrabold text-[#111] leading-none">87</span>
+                          <span className="text-3xl font-extrabold text-[#111] leading-none">
+                            {ROUTE_MERCHANTS[selectedMerchantId as keyof typeof ROUTE_MERCHANTS].score}
+                          </span>
                           <span className="text-[10px] text-stone-400 mt-1 select-none font-bold">/100</span>
                         </div>
                       </div>
@@ -1853,7 +1843,7 @@ export default function App() {
                         <Sparkles className="w-4.5 h-4.5 text-amber-500 shrink-0 mt-0.5" />
                         <p>
                           <span className="font-bold text-neutral-900">AI 总结：</span>
-                          判断该商家在单人座位、低峰舒适度和一人套餐方面表现较好，适合短时放松和独自用餐。
+                          {ROUTE_MERCHANTS[selectedMerchantId as keyof typeof ROUTE_MERCHANTS].aiSummary}
                         </p>
                       </div>
                     </div>
@@ -1863,7 +1853,7 @@ export default function App() {
                       <h3 className="text-[13px] font-extrabold text-neutral-800">核心评估维度</h3>
                       
                       <div className="space-y-3 p-4 bg-stone-50 rounded-2xl border border-stone-200/40 shadow-xs">
-                        {RIVERSIDE_EVAL_DIMENSIONS.map((dim, i) => (
+                        {ROUTE_MERCHANTS[selectedMerchantId as keyof typeof ROUTE_MERCHANTS].dimensions.map((dim, i) => (
                           <div key={i} className="flex items-center gap-3">
                             <span className="w-20 font-bold text-[11.5px] text-stone-700 text-right leading-none shrink-0 truncate">
                               {dim.label}

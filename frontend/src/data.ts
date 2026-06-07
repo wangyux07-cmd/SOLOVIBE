@@ -141,3 +141,48 @@ export const RIVERSIDE_EVAL_DIMENSIONS = [
   { label: "停留舒适度", score: 8.5, percentage: 85 },
   { label: "交通便利性", score: 8.0, percentage: 80 }
 ];
+
+export const STREET_FOOD_EVAL_DIMENSIONS = [
+  { label: "单人座友好", score: 8.2, percentage: 82 },
+  { label: "环境热闹度", score: 9.1, percentage: 91 },
+  { label: "一人套餐支持", score: 9.5, percentage: 95 },
+  { label: "独处不尴尬度", score: 8.8, percentage: 88 },
+  { label: "停留舒适度", score: 7.9, percentage: 79 },
+  { label: "交通便利性", score: 9.3, percentage: 93 }
+];
+
+export const QUIET_SPACE_EVAL_DIMENSIONS = [
+  { label: "单人座友好", score: 9.8, percentage: 98 },
+  { label: "环境安静度", score: 9.6, percentage: 96 },
+  { label: "一人套餐支持", score: 8.5, percentage: 85 },
+  { label: "独处不尴尬度", score: 9.7, percentage: 97 },
+  { label: "停留舒适度", score: 9.4, percentage: 94 },
+  { label: "交通便利性", score: 7.8, percentage: 78 }
+];
+
+export const ROUTE_MERCHANTS = {
+  "line-1": {
+    name: "Riverside Brew 河畔咖啡",
+    category: "精品咖啡 / 独处空间",
+    score: 87,
+    dimensions: RIVERSIDE_EVAL_DIMENSIONS,
+    aiSummary: "判断该商家在单人座位、低峰舒适度和一人套餐方面表现较好，适合短时放松和独自用餐。",
+    totalReviews: 128
+  },
+  "line-2": {
+    name: "老街口小吃铺",
+    category: "地道小吃 / 烟火气息", 
+    score: 85,
+    dimensions: STREET_FOOD_EVAL_DIMENSIONS,
+    aiSummary: "评估这家店在热闹氛围、性价比和单人就餐体验上表现优秀，适合想要感受城市烟火气的独行者。",
+    totalReviews: 245
+  },
+  "line-3": {
+    name: "静阅书屋",
+    category: "独立书店 / 静谧空间",
+    score: 92,
+    dimensions: QUIET_SPACE_EVAL_DIMENSIONS,
+    aiSummary: "评测显示该空间在安静环境、单人阅读区和沉浸体验方面表现卓越，是深度独处理和思考的理想场所。",
+    totalReviews: 89
+  }
+};
