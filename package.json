@@ -6,7 +6,7 @@
   "type": "module",
   "scripts": {
     "dev": "cd frontend && npm run dev",
-    "build": "npm install --prefix frontend && npm run build --prefix frontend && mv frontend/dist dist",
+    "build": "npm install --prefix frontend && ls -la frontend/node_modules/.bin/ && npm run build --prefix frontend",
     "preview": "cd frontend && npm run preview",
     "start": "cd frontend && npm run start",
     "clean": "cd frontend && npm run clean",
