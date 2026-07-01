@@ -1,4 +1,4 @@
-# SoloVibe - 独频漫游 AI 助手
+# SoloVibe 
 
 <div align="center">
 
